@@ -1,14 +1,72 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+enum Platform {
+  IOS
+  ANDROID
+}
+
+model Device {
+  id            String   @id @default(cuid())
+  expoPushToken String   @unique
+  platform      Platform
+  createdAt     DateTime @default(now())
+  lastSeenAt    DateTime @updatedAt
+
+  alerts Alert[]
+}
+
+model Alert {
+  id       String @id @default(cuid())
+  deviceId String
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  category     String
+  locationText String
+  priceMax     Int
+  keywords     String[]
+  isActive     Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  notificationLogs NotificationLog[]
+
+  @@index([deviceId])
+}
+
+model Listing {
+  id           String    @id @default(cuid())
+  source       String
+  externalId   String
+  title        String
+  price        Int?
+  locationText String?
+  url          String
+  postedAt     DateTime?
+  raw          Json?
+  createdAt    DateTime  @default(now())
+
+  notificationLogs NotificationLog[]
+
+  @@unique([source, externalId])
+}
+
+model NotificationLog {
+  id      String @id @default(cuid())
+  alertId String
+  alert   Alert  @relation(fields: [alertId], references: [id], onDelete: Cascade)
+
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  sentAt DateTime @default(now())
+
+  @@unique([alertId, listingId])
+  @@index([sentAt])
 }
