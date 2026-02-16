@@ -49,7 +49,7 @@ export async function scrapeLatestKpListings(req: Request, res: Response): Promi
   const take = Number.isFinite(limit) && limit > 0 && limit <= 50 ? limit : 20;
 
   if (Number.isNaN(page) || page < 1) {
-    res.status(400).json({ error: 'Invalid page number' });
+    res.status(400).json({ success: false, error: 'Invalid page number' });
     return;
   }
 
@@ -62,158 +62,92 @@ export async function scrapeLatestKpListings(req: Request, res: Response): Promi
     });
 
     const $ = cheerio.load(html);
-    const basicListings: Array<{ title: string; url: string }> = [];
+    const nextDataStr = $('#__NEXT_DATA__').first().text().trim();
 
-    // JSON-LD ItemList -> URL-ovi
-    $('script[type="application/ld+json"]').each((_, script) => {
-      try {
-        const jsonStr = $(script).html()?.trim();
-        if (!jsonStr) return;
+    if (!nextDataStr) {
+      res.status(500).json({ success: false, error: 'Missing __NEXT_DATA__ on latest page' });
+      return;
+    }
 
-        const data = JSON.parse(jsonStr);
-        if (data['@type'] === 'ItemList' && Array.isArray(data.itemListElement)) {
-          data.itemListElement.forEach((item: any, index: number) => {
-            if (item?.url && String(item.url).includes('/oglas/')) {
-              basicListings.push({
-                title: item.name || `Oglas #${index + 1}`,
-                url: String(item.url).startsWith('http')
-                  ? String(item.url)
-                  : `https://www.kupujemprodajem.com${item.url}`,
-              });
-            }
-          });
-        }
-      } catch {}
+    const nextData = JSON.parse(nextDataStr);
+
+    // 1) pokušaj da nađeš newest ids
+    const newestIds: string[] =
+      nextData?.props?.pageProps?.initialReduxState?.search?.newestAdsIds ??
+      nextData?.props?.initialReduxState?.search?.newestAdsIds ??
+      nextData?.props?.pageProps?.initialReduxState?.searchResult?.adsIds ??
+      [];
+
+    // 2) pokušaj da nađeš byId mapu
+    const byId =
+      nextData?.props?.pageProps?.initialReduxState?.search?.byId ??
+      nextData?.props?.initialReduxState?.search?.byId ??
+      nextData?.props?.pageProps?.initialReduxState?.searchResult?.byId ??
+      nextData?.props?.pageProps?.initialReduxState?.ad?.byId ??
+      {};
+
+    // Fallback: ako nema newestIds, uzmi ključeve byId
+    const ids = (Array.isArray(newestIds) && newestIds.length > 0)
+      ? newestIds
+      : Object.keys(byId);
+
+    const listings = ids.slice(0, take).map((idStr) => {
+      const item = byId[idStr];
+      const urlPath = String(item?.adUrl ?? '');
+      const absoluteUrl = urlPath.startsWith('http')
+        ? urlPath
+        : `https://www.kupujemprodajem.com${urlPath.startsWith('/') ? '' : '/'}${urlPath}`;
+
+      return {
+        id: Number(item?.id ?? idStr),
+        title: String(item?.name ?? ''),
+        url: absoluteUrl,
+        desc: String(item?.descriptionSnippetDecoded ?? item?.description ?? ''),
+        location: String(item?.location ?? ''),
+        categoryId: Number(item?.categoryId ?? 0),
+        categoryName: String(item?.categoryName ?? ''),
+        groupId: Number(item?.groupId ?? 0),
+        groupName: String(item?.groupName ?? ''),
+        priceNumber: typeof item?.priceNumber === 'number' ? item.priceNumber : null,
+        priceText: String(item?.priceText ?? ''),
+        currency: String(item?.currency ?? ''),
+        currencyAcronym: String(item?.currencyAcronym ?? ''),
+        postedRaw: String(item?.postedRaw ?? ''),
+        postedAt: toPostedAt(String(item?.postedRaw ?? '')),
+        validUntil: String(item?.adValidUntil ?? ''),
+        image: String(item?.image ?? item?.smallImage ?? ''),
+      } as KpListing;
     });
-
-    // uzmi poslednjih N (najnoviji)
-    const lastN = basicListings.slice(-take);
-
-    // details iz __NEXT_DATA__
-    const listings: KpListing[] = await Promise.all(
-      lastN.map(async (b) => {
-        try {
-          const d = await fetchOglasDetails(b.url);
-          // fallback title ako treba
-          return { ...d, title: d.title || b.title };
-        } catch {
-          // fallback (minimalno)
-          return {
-            id: Number(getAdIdFromUrl(b.url) || 0),
-            title: b.title,
-            url: b.url,
-            desc: '',
-            location: '',
-            categoryId: 0,
-            categoryName: '',
-            groupId: 0,
-            groupName: '',
-            priceNumber: null,
-            priceText: '',
-            currency: '',
-            currencyAcronym: '',
-            postedRaw: '',
-            postedAt: '',
-            validUntil: '',
-          };
-        }
-      })
-    );
 
     res.json({
       success: true,
       page,
       take,
-      totalBasicListings: basicListings.length,
+      count: listings.length,
       listings,
     });
   } catch (error: any) {
     console.error('Error scraping KP:', error.message);
-    res.status(500).json({ error: 'Failed to scrape KP listings' });
+    res.status(500).json({ success: false, error: 'Failed to scrape KP listings' });
   }
 }
 
 
-export async function scrapeOglasDetails(req: Request, res: Response): Promise<void> {
-  const { urls }: { urls: string[] } = req.body;
-
-  if (!Array.isArray(urls) || urls.length === 0) {
-    res.status(400).json({ error: 'urls[] is required' });
-    return;
-  }
-
-  const details = await Promise.all(
-    urls.slice(0, 5).map(async (u) => {
-      try {
-        return await fetchOglasDetails(u);
-      } catch {
-        return { url: u, error: 'Failed to scrape' };
-      }
-    })
-  );
-
-  res.json({ success: true, details });
-}
 
 
-async function fetchOglasDetails(url: string): Promise<KpListing> {
-  const { data: detailHtml } = await axios.get(url, {
-    headers: STEALTH_HEADERS,
-    timeout: 20000,
-  });
 
-  const $ = cheerio.load(detailHtml);
 
-  const nextDataStr = $('#__NEXT_DATA__').first().text().trim();
-  if (!nextDataStr) {
-    throw new Error('Missing __NEXT_DATA__');
-  }
 
-  const nextData = JSON.parse(nextDataStr);
 
-  const adId = getAdIdFromUrl(url);
-  if (!adId) {
-    throw new Error('Missing adId in url');
-  }
 
-  // KP kod tebe ima ad u: props.initialReduxState.ad.byId[adId]  (videli u paste)
-  // ali ostavljamo i fallback na pageProps varijantu.
-  const ad =
-    nextData?.props?.initialReduxState?.ad?.byId?.[adId] ??
-    nextData?.props?.pageProps?.initialReduxState?.ad?.byId?.[adId];
 
-  if (!ad) {
-    throw new Error(`Ad not found in __NEXT_DATA__ for id=${adId}`);
-  }
 
-  const postedRaw = String(ad.postedRaw ?? '');
-  const postedAt = toPostedAt(postedRaw);
 
-  return {
-    id: Number(ad.id ?? Number(adId)),
 
-    title: String(ad.name ?? ''),
-    url,
 
-    desc: stripHtmlTags(String(ad.description ?? '')),
 
-    location: String(ad.location ?? ''),
 
-    categoryId: Number(ad.categoryId ?? 0),
-    categoryName: String(ad.categoryName ?? ''),
-    groupId: Number(ad.groupId ?? 0),
-    groupName: String(ad.groupName ?? ''),
 
-    priceNumber: typeof ad.priceNumber === 'number' ? ad.priceNumber : (Number.isFinite(Number(ad.priceNumber)) ? Number(ad.priceNumber) : null),
-    priceText: String(ad.priceText ?? ''),
-    currency: String(ad.currency ?? ''),
-    currencyAcronym: String(ad.currencyAcronym ?? ''),
-
-    postedRaw,
-    postedAt,
-    validUntil: String(ad.adValidUntil ?? ad.validUntil ?? ''),
-  };
-}
 
 
 

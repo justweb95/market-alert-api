@@ -55,6 +55,7 @@ model Listing {
   notificationLogs NotificationLog[]
 
   @@unique([source, externalId])
+  @@index([createdAt])
 }
 
 model NotificationLog {
