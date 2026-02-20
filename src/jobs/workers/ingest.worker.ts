@@ -2,6 +2,7 @@
 import { Worker } from 'bullmq';
 import { redisConnection } from '../redis';
 import { prisma } from '../../db/prisma';
+import { matchAndNotify } from '../../features/notification/matcher.ts';
 
 import { scrapeKpLatest } from '../../features/kpPages/kpPages.scraper.ts';
 import { scrapePaLatestCars, scrapePaLatestMotos } from '../../features/paPages/paPages.scraper.ts';
@@ -55,17 +56,8 @@ export const ingestWorker = new Worker(
       // KP
       for (const it of kp.listings) {
         await prisma.listing.upsert({
-          where: {
-            source_externalId: {
-              source: 'kp',
-              externalId: String(it.id),
-            },
-          },
-          update: {
-            title: it.title,
-            url: it.url,
-            raw: it as any,
-          },
+          where: { source_externalId: { source: 'kp', externalId: String(it.id) } },
+          update: { title: it.title, url: it.url, raw: it as any },
           create: {
             source: 'kp',
             externalId: String(it.id),
@@ -81,17 +73,8 @@ export const ingestWorker = new Worker(
       // PA cars
       for (const it of paCars.listings) {
         await prisma.listing.upsert({
-          where: {
-            source_externalId: {
-              source: 'pa-car',
-              externalId: String(it.id),
-            },
-          },
-          update: {
-            title: it.title,
-            url: it.url,
-            raw: it as any,
-          },
+          where: { source_externalId: { source: 'pa-car', externalId: String(it.id) } },
+          update: { title: it.title, url: it.url, raw: it as any },
           create: {
             source: 'pa-car',
             externalId: String(it.id),
@@ -107,17 +90,8 @@ export const ingestWorker = new Worker(
       // PA motos
       for (const it of paMotos.listings) {
         await prisma.listing.upsert({
-          where: {
-            source_externalId: {
-              source: 'pa-moto',
-              externalId: String(it.id),
-            },
-          },
-          update: {
-            title: it.title,
-            url: it.url,
-            raw: it as any,
-          },
+          where: { source_externalId: { source: 'pa-moto', externalId: String(it.id) } },
+          update: { title: it.title, url: it.url, raw: it as any },
           create: {
             source: 'pa-moto',
             externalId: String(it.id),
@@ -131,6 +105,21 @@ export const ingestWorker = new Worker(
       }
 
       console.log('[ingest] upserted', upserted);
+
+      // ---- 3) MATCH & NOTIFY (tek kad su SVI u bazi) ----
+      const dbListings = await prisma.listing.findMany({
+        where: {
+          OR: [
+            ...kp.listings.map((x) => ({ source: 'kp', externalId: String(x.id) })),
+            ...paCars.listings.map((x) => ({ source: 'pa-car', externalId: String(x.id) })),
+            ...paMotos.listings.map((x) => ({ source: 'pa-moto', externalId: String(x.id) })),
+          ],
+        },
+      });
+
+      console.log('[ingest] matching', dbListings.length, 'listings against alerts');
+      await matchAndNotify(dbListings);
+
     } catch (e) {
       console.error('[ingest] UPSERT FAILED', e);
       throw e;
