@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import axios from "axios";
 import * as cheerio from "cheerio";
-import { parsePowerKwHp } from "../../helpers/paPages.helper.ts";
+import { parsePowerKwHp } from "../../helpers/paPages.helper.js";
 
 
 

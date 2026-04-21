@@ -1,6 +1,6 @@
 import { Worker } from 'bullmq';
-import { redisConnection } from '../redis';
-import { prisma } from '../../db/prisma';
+import { redisConnection } from '../redis.js';
+import { prisma } from '../../db/prisma.js';
 
 export const maintenanceWorker = new Worker(
   'maintenance',

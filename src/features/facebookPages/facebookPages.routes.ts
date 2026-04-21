@@ -1,6 +1,5 @@
 import { Router } from "express";
-import { readPagePosts, 
-  fbMe, listMyGroups} from "./facebookPages.controller";
+import { readPagePosts, fbMe, listMyGroups } from "./facebookPages.controller.js";
 
 
 export const facebookPagesRouter = Router();

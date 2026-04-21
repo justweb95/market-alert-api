@@ -4,7 +4,7 @@ import * as cheerio from 'cheerio';
 import { 
   getAdIdFromUrl, 
   stripHtmlTags, 
-  toPostedAt } from '../../helpers/kpPages.helper.ts';
+  toPostedAt } from '../../helpers/kpPages.helper.js';
 
 const STEALTH_HEADERS: Record<string, string> = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',

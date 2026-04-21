@@ -1,17 +1,19 @@
 import "dotenv/config";
-import { app } from "./app.js";
-import { prisma } from "./db.ts";
+import { app, installErrorHandler } from "./app.js";
+import { prisma } from "./db.js";
 
 import { facebookPagesRouter } from "./features/facebookPages/facebookPages.routes.js";
-import { kpPagesRouter } from "./features/kpPages/kpPages.routes.ts";
-import { paPagesRouter } from "./features/paPages/paPages.routes.ts";
+import { kpPagesRouter } from "./features/kpPages/kpPages.routes.js";
+import { paPagesRouter } from "./features/paPages/paPages.routes.js";
+import { notificationRouter } from "./features/notification/notification.routes.js";
 
+import { Queue } from "bullmq";
+import { startSchedulers } from "./jobs/scheduler.js";
+import { redisConnection } from "./jobs/redis.js";
 
-import 'dotenv/config';
-import { startSchedulers } from './jobs/scheduler';
-
-import './jobs/workers/ingest.worker';
-import './jobs/workers/maintenance.worker';
+import "./jobs/workers/ingest.worker.js";
+import "./jobs/workers/maintenance.worker.js";
+import "./jobs/workers/notification.worker.js";
 
 await startSchedulers();
 
@@ -25,9 +27,14 @@ app.use('/api/kp/', kpPagesRouter);
 // PolovniAutomobili API routes
 app.use('/api/pa/', paPagesRouter);
 
+app.use('/api/notifications', notificationRouter);
+installErrorHandler();
+
 app.listen(port, "0.0.0.0", () => {
   console.log(`API listening on http://localhost:${port}`);
 });
+
+
 
 
 app.get("/health", (req, res) => {
@@ -44,14 +51,10 @@ app.get("/debug/listings", async (req, res) => {
   res.json({ count, last10 });
 });
 
+const ingestQueue = new Queue("ingest", { connection: redisConnection });
 
-import { Queue } from 'bullmq';
-import { redisConnection } from './jobs/redis';
-
-const ingestQueue = new Queue('ingest', { connection: redisConnection });
-
-app.post('/debug/run-ingest', async (req, res) => {
-  const job = await ingestQueue.add('ingest_latest', { take: 5 });
+app.post("/debug/run-ingest", async (req, res) => {
+  const job = await ingestQueue.add("ingest_latest", { take: 5 });
   res.json({ ok: true, jobId: job.id });
 });
 

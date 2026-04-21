@@ -1,0 +1,8 @@
+version: 3
+agent:
+  authtoken: 3A5fjASYOgDGtkcZ1Kl1p3WGzep_4mKGoUwXGxAjDykNmzau5
+tunnels:
+  api:
+    proto: http
+    addr: 3000
+    domain: quietistic-unsettlingly-mavis.ngrok-free.dev

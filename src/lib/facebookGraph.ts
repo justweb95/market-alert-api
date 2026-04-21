@@ -3,7 +3,16 @@ import "dotenv/config";
 const version = process.env.FB_GRAPH_VERSION ?? "v20.0";
 const baseUrl = `https://graph.facebook.com/${version}`;
 
-export async function graphGet(path: string, params: Record<string, string>): Promise<any> {
+type GraphErrorPayload = {
+  error?: {
+    message?: string;
+  };
+};
+
+export async function graphGet<T = unknown>(
+  path: string,
+  params: Record<string, string>,
+): Promise<T> {
   const token = process.env.FB_ACCESS_TOKEN;
   
   if (!token) throw new Error("Facebook access token is not set in environment variables");
@@ -15,11 +24,14 @@ export async function graphGet(path: string, params: Record<string, string>): Pr
     headers: { Authorization: `Bearer ${token}` }
   });
 
-  const data = await response.json();
+  const data: unknown = await response.json();
 
   if (!response.ok) {
-    throw new Error(`Facebook Graph API error: ${data.error?.message || response.statusText}`);
+    const errorData = data as GraphErrorPayload;
+    throw new Error(
+      `Facebook Graph API error: ${errorData.error?.message || response.statusText}`,
+    );
   }
 
-  return data;
+  return data as T;
 }

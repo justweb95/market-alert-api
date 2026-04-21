@@ -9,6 +9,7 @@ datasource db {
 enum Platform {
   IOS
   ANDROID
+  WEB
 }
 
 model Device {
@@ -18,7 +19,8 @@ model Device {
   createdAt     DateTime @default(now())
   lastSeenAt    DateTime @updatedAt
 
-  alerts Alert[]
+  alerts        Alert[]
+  notifications Notification[]
 }
 
 model Alert {
@@ -70,4 +72,35 @@ model NotificationLog {
 
   @@unique([alertId, listingId])
   @@index([sentAt])
+}
+
+model Notification {
+  id        String @id @default(cuid())
+  deviceId  String
+  device    Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  title     String
+  body      String
+  data      Json?             @default("{}")
+  status    NotificationStatus @default(PENDING)
+  retries   Int               @default(0)
+  lastError String?
+  sentAt    DateTime?
+  failedAt  DateTime?
+
+  listingId String?
+  alertId   String?
+
+  createdAt DateTime @default(now())
+  seenAt    DateTime?
+
+  @@index([deviceId, status])
+  @@index([createdAt])
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  SEEN
 }
