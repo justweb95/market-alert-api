@@ -202,13 +202,13 @@ function titleLooksLikeAutoPart(title: string): boolean {
 
 function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
   const categoryMap: Record<string, string[]> = {
-    AUTOMOBILI: ["pa-car", "kp"],
-    AUTO_DELOVI: ["kp"],
-    MOTORI: ["pa-moto", "kp"],
-    TELEFONI: ["kp"],
-    RACUNARI: ["kp"],
-    BICIKLI: ["kp"],
-    NEKRETNINE: ["kp"],
+    AUTOMOBILI: ["pa-car", "kp", "fb-group", "fb-marketplace"],
+    AUTO_DELOVI: ["kp", "fb-group", "fb-marketplace"],
+    MOTORI: ["pa-moto", "kp", "fb-group", "fb-marketplace"],
+    TELEFONI: ["kp", "fb-group", "fb-marketplace"],
+    RACUNARI: ["kp", "fb-group", "fb-marketplace"],
+    BICIKLI: ["kp", "fb-group", "fb-marketplace"],
+    NEKRETNINE: ["kp", "fb-group", "fb-marketplace"],
   };
 
   const allowedSources = categoryMap[alert.category] ?? [];

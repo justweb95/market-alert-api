@@ -5,6 +5,7 @@ import { prisma } from '../../db/prisma.js';
 import { matchAndNotify } from '../../features/notification/matcher.js';
 import { scrapeKpLatest } from '../../features/kpPages/kpPages.scraper.js';
 import { scrapePaLatestCars, scrapePaLatestMotos } from '../../features/paPages/paPages.scraper.js';
+import { scrapeFacebookGroupsLatest, scrapeFacebookMarketplaceLatest, } from '../../features/facebookPages/facebookSources.scraper.js';
 function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
 }
@@ -26,7 +27,42 @@ function extractListingData(listing, source) {
         price = priceMatch ? parseFloat(priceMatch[1]) : null;
         locationText = listing.city || null;
     }
+    else if (source.startsWith('fb-')) {
+        price = typeof listing.price === 'number' ? listing.price : null;
+        locationText = listing.locationText || null;
+    }
     return { price, locationText };
+}
+async function upsertListingsBySource(source, listings) {
+    let upserted = 0;
+    for (const it of listings) {
+        const externalId = String(it.id);
+        if (!externalId || !it.title || !it.url)
+            continue;
+        const { price, locationText } = extractListingData(it, source);
+        await prisma.listing.upsert({
+            where: { source_externalId: { source, externalId } },
+            update: {
+                title: it.title,
+                url: it.url,
+                price,
+                locationText,
+                raw: it,
+            },
+            create: {
+                source,
+                externalId,
+                title: it.title,
+                url: it.url,
+                price,
+                locationText,
+                raw: it,
+                createdAt: new Date(),
+            },
+        });
+        upserted++;
+    }
+    return upserted;
 }
 export const ingestWorker = new Worker('ingest', async (job) => {
     if (job.name !== 'ingest_latest')
@@ -44,6 +80,10 @@ export const ingestWorker = new Worker('ingest', async (job) => {
     let kp = { listings: [] };
     let paCars = { listings: [] };
     let paMotos = { listings: [] };
+    let fbGroups = { listings: [] };
+    let fbMarketplace = {
+        listings: [],
+    };
     try {
         kp = await scrapeKpLatest({ page: 1, take });
     }
@@ -62,10 +102,24 @@ export const ingestWorker = new Worker('ingest', async (job) => {
     catch (error) {
         console.error('[ingest] PA motos scrape failed', error);
     }
+    try {
+        fbGroups = await scrapeFacebookGroupsLatest({ take });
+    }
+    catch (error) {
+        console.error('[ingest] FB groups scrape failed', error);
+    }
+    try {
+        fbMarketplace = await scrapeFacebookMarketplaceLatest({ take });
+    }
+    catch (error) {
+        console.error('[ingest] FB marketplace scrape failed', error);
+    }
     console.log('[ingest] scraped', {
         kp: kp.listings.length,
         paCars: paCars.listings.length,
         paMotos: paMotos.listings.length,
+        fbGroups: fbGroups.listings.length,
+        fbMarketplace: fbMarketplace.listings.length,
     });
     // ---- 2) UPSERT (NO DUPES) ----
     const before = await prisma.listing.count();
@@ -73,69 +127,19 @@ export const ingestWorker = new Worker('ingest', async (job) => {
     console.time('[ingest] upsert_total');
     try {
         let upserted = 0;
-        // KP
-        for (const it of kp.listings) {
-            const { price, locationText } = extractListingData(it, 'kp');
-            await prisma.listing.upsert({
-                where: { source_externalId: { source: 'kp', externalId: String(it.id) } },
-                update: { title: it.title, url: it.url, price, locationText, raw: it },
-                create: {
-                    source: 'kp',
-                    externalId: String(it.id),
-                    title: it.title,
-                    url: it.url,
-                    price,
-                    locationText,
-                    raw: it,
-                    createdAt: new Date(),
-                },
-            });
-            upserted++;
-        }
-        // PA cars
-        for (const it of paCars.listings) {
-            const { price, locationText } = extractListingData(it, 'pa-car');
-            await prisma.listing.upsert({
-                where: { source_externalId: { source: 'pa-car', externalId: String(it.id) } },
-                update: { title: it.title, url: it.url, price, locationText, raw: it },
-                create: {
-                    source: 'pa-car',
-                    externalId: String(it.id),
-                    title: it.title,
-                    url: it.url,
-                    price,
-                    locationText,
-                    raw: it,
-                    createdAt: new Date(),
-                },
-            });
-            upserted++;
-        }
-        // PA motos
-        for (const it of paMotos.listings) {
-            const { price, locationText } = extractListingData(it, 'pa-moto');
-            await prisma.listing.upsert({
-                where: { source_externalId: { source: 'pa-moto', externalId: String(it.id) } },
-                update: { title: it.title, url: it.url, price, locationText, raw: it },
-                create: {
-                    source: 'pa-moto',
-                    externalId: String(it.id),
-                    title: it.title,
-                    url: it.url,
-                    price,
-                    locationText,
-                    raw: it,
-                    createdAt: new Date(),
-                },
-            });
-            upserted++;
-        }
+        upserted += await upsertListingsBySource('kp', kp.listings);
+        upserted += await upsertListingsBySource('pa-car', paCars.listings);
+        upserted += await upsertListingsBySource('pa-moto', paMotos.listings);
+        upserted += await upsertListingsBySource('fb-group', fbGroups.listings);
+        upserted += await upsertListingsBySource('fb-marketplace', fbMarketplace.listings);
         console.log('[ingest] upserted', upserted);
         // ---- 3) MATCH & NOTIFY (za listinge koji su stvarno scrape-ovani) ----
         const matchConditions = [
             ...kp.listings.map((x) => ({ source: 'kp', externalId: String(x.id) })),
             ...paCars.listings.map((x) => ({ source: 'pa-car', externalId: String(x.id) })),
             ...paMotos.listings.map((x) => ({ source: 'pa-moto', externalId: String(x.id) })),
+            ...fbGroups.listings.map((x) => ({ source: 'fb-group', externalId: String(x.id) })),
+            ...fbMarketplace.listings.map((x) => ({ source: 'fb-marketplace', externalId: String(x.id) })),
         ];
         if (matchConditions.length > 0) {
             const dbListings = await prisma.listing.findMany({

@@ -107,17 +107,52 @@ function buildBatchPushBody(keywords, listings) {
         .join(", ");
     return `${prefix}. Primeri: ${preview}`;
 }
+const AUTO_PARTS_KEYWORDS = [
+    "deo",
+    "delovi",
+    "diferencijal",
+    "menjac",
+    "motor",
+    "amortizer",
+    "turbina",
+    "alternator",
+    "anlaser",
+    "kociona",
+    "kocnice",
+    "disk",
+    "plocice",
+    "kvacilo",
+    "far",
+    "stop",
+    "branik",
+    "retrovizor",
+    "trap",
+    "lezaj",
+    "poluosovina",
+    "hladnjak",
+    "set kvacila",
+];
+function titleLooksLikeAutoPart(title) {
+    const lower = title.toLowerCase();
+    return AUTO_PARTS_KEYWORDS.some((keyword) => lower.includes(keyword));
+}
 function doesMatch(listing, alert) {
     const categoryMap = {
-        AUTOMOBILI: ["pa-car", "kp"],
-        MOTORI: ["pa-moto", "kp"],
-        TELEFONI: ["kp"],
-        RACUNARI: ["kp"],
-        BICIKLI: ["kp"],
-        NEKRETNINE: ["kp"],
+        AUTOMOBILI: ["pa-car", "kp", "fb-group", "fb-marketplace"],
+        AUTO_DELOVI: ["kp", "fb-group", "fb-marketplace"],
+        MOTORI: ["pa-moto", "kp", "fb-group", "fb-marketplace"],
+        TELEFONI: ["kp", "fb-group", "fb-marketplace"],
+        RACUNARI: ["kp", "fb-group", "fb-marketplace"],
+        BICIKLI: ["kp", "fb-group", "fb-marketplace"],
+        NEKRETNINE: ["kp", "fb-group", "fb-marketplace"],
     };
     const allowedSources = categoryMap[alert.category] ?? [];
     if (!allowedSources.includes(listing.source))
+        return false;
+    const looksLikePart = titleLooksLikeAutoPart(listing.title);
+    if (alert.category === "AUTOMOBILI" && looksLikePart)
+        return false;
+    if (alert.category === "AUTO_DELOVI" && !looksLikePart)
         return false;
     if (alert.priceMax && listing.price != null && listing.price > alert.priceMax) {
         return false;

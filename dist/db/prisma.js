@@ -1,7 +1,9 @@
 // src/db/prisma.ts
 import 'dotenv/config';
-import { PrismaClient } from '@prisma/client';
+import { createRequire } from 'node:module';
 import { PrismaPg } from '@prisma/adapter-pg';
+const require = createRequire(import.meta.url);
+const { PrismaClient } = require('@prisma/client');
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 export const prisma = new PrismaClient({ adapter });
 //# sourceMappingURL=prisma.js.map
