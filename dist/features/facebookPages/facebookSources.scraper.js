@@ -1,4 +1,97 @@
 import { graphGet } from "../../lib/facebookGraph.js";
+function getStringFromUnknown(value) {
+    if (typeof value !== "string")
+        return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+function getIdFromApifyItem(item) {
+    const candidates = [
+        item.id,
+        item.listingId,
+        item.listing_id,
+        item.itemId,
+        item.postId,
+    ];
+    for (const candidate of candidates) {
+        if (typeof candidate === "number" && Number.isFinite(candidate)) {
+            return String(candidate);
+        }
+        const value = getStringFromUnknown(candidate);
+        if (value)
+            return value;
+    }
+    const fallbackUrl = getStringFromUnknown(item.url) || getStringFromUnknown(item.listingUrl);
+    if (fallbackUrl)
+        return fallbackUrl;
+    return null;
+}
+function normalizeApifyMarketplaceItem(item) {
+    const id = getIdFromApifyItem(item);
+    const title = getStringFromUnknown(item.title) ||
+        getStringFromUnknown(item.name) ||
+        getStringFromUnknown(item.description);
+    const url = getStringFromUnknown(item.url) ||
+        getStringFromUnknown(item.listingUrl) ||
+        getStringFromUnknown(item.permalink);
+    if (!id || !title || !url)
+        return null;
+    const location = getStringFromUnknown(item.location) ||
+        getStringFromUnknown(item.city) ||
+        getStringFromUnknown(item.marketplaceRegion);
+    const image = getStringFromUnknown(item.image) ||
+        getStringFromUnknown(item.primaryListingPhotoUri) ||
+        getStringFromUnknown(item.primaryPhoto);
+    return {
+        id,
+        title,
+        url,
+        price: parsePrice(item.price),
+        locationText: location,
+        image,
+        raw: item,
+    };
+}
+async function scrapeFacebookMarketplaceViaApify(input) {
+    const token = process.env.APIFY_TOKEN?.trim();
+    const urls = (process.env.FB_MARKETPLACE_URLS || "")
+        .split(",")
+        .map((url) => url.trim())
+        .filter(Boolean);
+    if (!token || urls.length === 0) {
+        return { listings: [] };
+    }
+    const actorId = process.env.FB_MARKETPLACE_APIFY_ACTOR_ID?.trim() ||
+        "curious_coder/facebook-marketplace";
+    const inputPayload = {
+        urls,
+        cookies: process.env.FB_MARKETPLACE_COOKIES || "",
+        getListingDetails: false,
+        getAllListingPhotos: false,
+        strictFiltering: true,
+        maxPagesPerUrl: Number(process.env.FB_MARKETPLACE_MAX_PAGES || 1),
+    };
+    const proxyCountry = process.env.FB_MARKETPLACE_PROXY_COUNTRY?.trim().toUpperCase() || "RS";
+    if (proxyCountry) {
+        inputPayload.proxy = { useApifyProxy: true, apifyProxyGroups: ["RESIDENTIAL"], apifyProxyCountry: proxyCountry };
+    }
+    const endpoint = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+    const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(inputPayload),
+    });
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`[fb-marketplace] Apify ${response.status}: ${errorText || response.statusText}`);
+    }
+    const payload = (await response.json());
+    const listings = payload
+        .map(normalizeApifyMarketplaceItem)
+        .filter((item) => item !== null)
+        .slice(0, input.take);
+    return { listings };
+}
 function normalizeMarketplaceItem(item) {
     const id = String(item.id || "").trim();
     const title = item.title?.trim();
@@ -86,12 +179,17 @@ export async function scrapeFacebookGroupsLatest(input) {
     return { listings: allListings.slice(0, input.take) };
 }
 export async function scrapeFacebookMarketplaceLatest(input) {
+    const apifyListings = await scrapeFacebookMarketplaceViaApify(input);
+    if (apifyListings.listings.length > 0) {
+        return apifyListings;
+    }
     const endpoint = process.env.FB_MARKETPLACE_API_URL?.trim();
     if (!endpoint) {
         return { listings: [] };
     }
     const requestUrl = new URL(endpoint);
     requestUrl.searchParams.set("take", String(input.take));
+    requestUrl.searchParams.set("country", "RS");
     const apiKey = process.env.FB_MARKETPLACE_API_KEY?.trim();
     const requestInit = {};
     if (apiKey) {

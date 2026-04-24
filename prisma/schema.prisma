@@ -12,15 +12,41 @@ enum Platform {
   WEB
 }
 
+enum PlanTier {
+  FREE
+  BRONZE
+  SILVER
+  GOLD
+}
+
+model User {
+  id        String   @id @default(cuid())
+  firstName String
+  lastName  String
+  email     String   @unique
+  passwordHash String
+  planTier  PlanTier @default(FREE)
+  promoCodeUsed String?
+  promoRedeemedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  devices Device[]
+}
+
 model Device {
   id            String   @id @default(cuid())
   expoPushToken String   @unique
   platform      Platform
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   createdAt     DateTime @default(now())
   lastSeenAt    DateTime @updatedAt
 
   alerts        Alert[]
   notifications Notification[]
+
+  @@index([userId])
 }
 
 model Alert {
