@@ -139,4 +139,61 @@ export async function scrapePaLatestMotos(opts) {
     const latest = listings.slice(0, take);
     return { take, count: latest.length, listings: latest };
 }
+export async function scrapePaMotoPartsAndEquipmentBeta(opts) {
+    const take = clampTake(opts?.take);
+    const timeoutMs = opts?.timeoutMs ?? 10_000;
+    const targetUrl = process.env.PA_MOTO_PARTS_URL ??
+        'https://www.polovniautomobili.com/delovi-i-oprema/motori/moto-delovi-i-oprema/pretraga?text_search=&submit=';
+    const { data: html } = await axios.get(targetUrl, {
+        headers: STEALTH_HEADERS,
+        timeout: timeoutMs,
+    });
+    const $ = cheerio.load(html);
+    const listings = [];
+    $('script[type="application/ld+json"]').each((_, el) => {
+        try {
+            const raw = $(el).html();
+            if (!raw)
+                return;
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed) || !parsed[0])
+                return;
+            const item = parsed[0];
+            const title = String(item.name ?? '').trim();
+            const urlStr = String(item.url ?? '').trim();
+            if (!title || !urlStr)
+                return;
+            const idMatch = urlStr.match(/\/(\d+)(?:\/|$)/);
+            if (!idMatch)
+                return;
+            const id = Number(idMatch[1]);
+            if (!Number.isFinite(id))
+                return;
+            const absoluteUrl = urlStr.startsWith('http')
+                ? urlStr
+                : `https://www.polovniautomobili.com${urlStr.startsWith('/') ? '' : '/'}${urlStr}`;
+            const article = $(`article.ad-${id}, article[data-classifiedid="${id}"]`).first();
+            const articleText = article.text().replace(/\s+/g, ' ').trim().toLowerCase();
+            const listingType = /(oprema|kaciga|jakna|rukavice|cizme|protektor)/.test(articleText) ||
+                /(oprema|kaciga|jakna|rukavice|cizme|protektor)/.test(title.toLowerCase())
+                ? 'MOTO_EQUIPMENT'
+                : 'MOTO_PART';
+            listings.push({
+                id,
+                title,
+                url: absoluteUrl,
+                priceEur: article.find('.price span').first().text().replace(/\s+/g, ' ').trim(),
+                city: article.find('.city').text().replace(/\s+/g, ' ').trim(),
+                image: String(item.image ?? '').trim(),
+                renewedAt: String(article.attr('data-renewdate') ?? '').trim(),
+                listingType,
+            });
+        }
+        catch {
+            // ignore parse errors
+        }
+    });
+    const latest = listings.slice(0, take);
+    return { take, count: latest.length, listings: latest };
+}
 //# sourceMappingURL=paPages.scraper.js.map

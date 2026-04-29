@@ -8,7 +8,13 @@ type AlertWithDevice = {
   deviceId: string;
   category: string;
   keywords: string[];
-  priceMax: number;
+  priceMax: number | null;
+  locationText: string;
+  propertyType: string | null;
+  yearFrom: number | null;
+  yearTo: number | null;
+  kmFrom: number | null;
+  kmTo: number | null;
   isActive: boolean;
   device: { expoPushToken: string };
 };
@@ -169,35 +175,133 @@ function buildBatchPushBody(
   return `${prefix}. Primeri: ${preview}`;
 }
 
-const AUTO_PARTS_KEYWORDS = [
-  "deo",
-  "delovi",
-  "diferencijal",
-  "menjac",
-  "motor",
-  "amortizer",
-  "turbina",
-  "alternator",
-  "anlaser",
-  "kociona",
-  "kocnice",
-  "disk",
-  "plocice",
-  "kvacilo",
-  "far",
-  "stop",
-  "branik",
-  "retrovizor",
-  "trap",
-  "lezaj",
-  "poluosovina",
-  "hladnjak",
-  "set kvacila",
-];
+function normalizeForMatch(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
 
-function titleLooksLikeAutoPart(title: string): boolean {
-  const lower = title.toLowerCase();
-  return AUTO_PARTS_KEYWORDS.some((keyword) => lower.includes(keyword));
+function extractRawObject(listing: ListingRow): Record<string, unknown> {
+  if (!listing.raw || typeof listing.raw !== "object") return {};
+  return listing.raw as Record<string, unknown>;
+}
+
+function buildListingText(listing: ListingRow): string {
+  const raw = extractRawObject(listing);
+  return normalizeForMatch([
+    listing.title,
+    listing.url,
+    listing.locationText ?? "",
+    String(raw.categoryName ?? ""),
+    String(raw.groupName ?? ""),
+    String(raw.desc ?? ""),
+    String(raw.description ?? ""),
+  ].join(" "));
+}
+
+function isAutoPartText(text: string): boolean {
+  return /(auto[-\s]?delov|diferencijal|menjac|amortizer|turbina|alternator|anlaser|kocnic|kvacil|far|stop|branik|retrovizor|trap|lezaj|poluosovin|hladnjak)/.test(text);
+}
+
+function isAutoVehicleText(text: string): boolean {
+  return /(auto[-\s]?oglasi|automobil|vozilo|limuzina|karavan|hatchback|suv|coupe|kabrio|sedan)/.test(text);
+}
+
+function isMotoText(text: string): boolean {
+  return /(motori|motocikl|motorcikl|skuter|atv|quad)/.test(text);
+}
+
+function isMotoPartText(text: string): boolean {
+  return /(moto[-\s]?delov|delov[i]?\s+za\s+mot|lanci|lanac|karburator|auspuh|vizir|kofer|kaciga\s+del)/.test(text);
+}
+
+function isMotoEquipmentText(text: string): boolean {
+  return /(moto[-\s]?oprema|jakna|rukavic|kaciga|cizme|protektor|oprema\s+za\s+mot)/.test(text);
+}
+
+function isPropertyText(text: string): boolean {
+  return /(nekretnin|stan|lokal|kuca|plac|parcela|zemljiste)/.test(text);
+}
+
+function getPropertyTypeFromListing(listing: ListingRow): "STAN" | "LOKAL" | "PARCELA" | null {
+  const text = buildListingText(listing);
+  if (/(lokal|lokali)/.test(text)) return "LOKAL";
+  if (/(plac|parcela|zemljiste)/.test(text)) return "PARCELA";
+  if (/(stan|garsonjera|apartman)/.test(text)) return "STAN";
+  return null;
+}
+
+function getListingKinds(listing: ListingRow): Set<string> {
+  const kinds = new Set<string>();
+  const text = buildListingText(listing);
+
+  if (listing.source === "pa-car") {
+    kinds.add("AUTO_VEHICLE");
+  }
+
+  if (listing.source === "pa-moto") {
+    kinds.add("MOTO_VEHICLE");
+  }
+
+  if (listing.source === "pa-moto-parts-beta") {
+    if (isMotoEquipmentText(text)) kinds.add("MOTO_EQUIPMENT");
+    if (isMotoPartText(text) || !isMotoEquipmentText(text)) kinds.add("MOTO_PART");
+  }
+
+  if (isAutoPartText(text)) kinds.add("AUTO_PART");
+  if (isAutoVehicleText(text) && !isAutoPartText(text)) kinds.add("AUTO_VEHICLE");
+
+  if (isMotoText(text)) {
+    if (isMotoPartText(text)) kinds.add("MOTO_PART");
+    if (isMotoEquipmentText(text)) kinds.add("MOTO_EQUIPMENT");
+    if (!isMotoPartText(text) && !isMotoEquipmentText(text)) {
+      kinds.add("MOTO_VEHICLE");
+    }
+  }
+
+  if (isPropertyText(text)) kinds.add("PROPERTY");
+
+  return kinds;
+}
+
+function getListingYear(listing: ListingRow): number | null {
+  const raw = extractRawObject(listing);
+  const directCandidates = [raw.year, raw.productionDate, raw.godiste];
+  for (const candidate of directCandidates) {
+    const match = String(candidate ?? "").match(/(19\d{2}|20\d{2})/);
+    if (match) return Number(match[1]);
+  }
+
+  const titleMatch = listing.title.match(/(19\d{2}|20\d{2})/);
+  return titleMatch ? Number(titleMatch[1]) : null;
+}
+
+function parseKmText(value: unknown): number | null {
+  const text = String(value ?? "");
+  const match = text.match(/([\d\.\s]{2,})\s*km/i);
+  if (!match || !match[1]) return null;
+
+  const normalized = match[1].replace(/[\.\s]/g, "");
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getListingKm(listing: ListingRow): number | null {
+  const raw = extractRawObject(listing);
+  return (
+    parseKmText(raw.km) ??
+    parseKmText(raw.mileageFromOdometer) ??
+    parseKmText(listing.title)
+  );
+}
+
+function locationMatches(listing: ListingRow, locationText: string): boolean {
+  const target = normalizeForMatch(locationText);
+  if (!target) return true;
+  const listingText = buildListingText(listing);
+  return listingText.includes(target);
 }
 
 function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
@@ -205,27 +309,67 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
     AUTOMOBILI: ["pa-car", "kp", "fb-group", "fb-marketplace"],
     AUTO_DELOVI: ["kp", "fb-group", "fb-marketplace"],
     MOTORI: ["pa-moto", "kp", "fb-group", "fb-marketplace"],
+    MOTO_DELOVI: ["pa-moto-parts-beta", "kp", "fb-group", "fb-marketplace"],
+    MOTO_OPREMA: ["pa-moto-parts-beta", "kp", "fb-group", "fb-marketplace"],
     TELEFONI: ["kp", "fb-group", "fb-marketplace"],
     RACUNARI: ["kp", "fb-group", "fb-marketplace"],
     BICIKLI: ["kp", "fb-group", "fb-marketplace"],
     NEKRETNINE: ["kp", "fb-group", "fb-marketplace"],
+    SVE: ["pa-car", "pa-moto", "pa-moto-parts-beta", "kp", "fb-group", "fb-marketplace"],
   };
 
-  const allowedSources = categoryMap[alert.category] ?? [];
+  const normalizedCategory = alert.category.toUpperCase();
+  const allowedSources = categoryMap[normalizedCategory] ?? [];
   if (!allowedSources.includes(listing.source)) return false;
 
-  const looksLikePart = titleLooksLikeAutoPart(listing.title);
-  if (alert.category === "AUTOMOBILI" && looksLikePart) return false;
-  if (alert.category === "AUTO_DELOVI" && !looksLikePart) return false;
+  if (normalizedCategory === "SVE") {
+    if (alert.keywords.length === 0) return false;
+    const titleLower = normalizeForMatch(listing.title);
+    return alert.keywords.every((kw) =>
+      titleLower.includes(normalizeForMatch(kw)),
+    );
+  }
 
-  if (alert.priceMax && listing.price != null && listing.price > alert.priceMax) {
+  const listingKinds = getListingKinds(listing);
+  if (normalizedCategory === "AUTOMOBILI" && !listingKinds.has("AUTO_VEHICLE")) return false;
+  if (normalizedCategory === "AUTO_DELOVI" && !listingKinds.has("AUTO_PART")) return false;
+  if (normalizedCategory === "MOTORI" && !listingKinds.has("MOTO_VEHICLE")) return false;
+  if (normalizedCategory === "MOTO_DELOVI" && !listingKinds.has("MOTO_PART")) return false;
+  if (normalizedCategory === "MOTO_OPREMA" && !listingKinds.has("MOTO_EQUIPMENT")) return false;
+  if (normalizedCategory === "NEKRETNINE" && !listingKinds.has("PROPERTY")) return false;
+
+  if (normalizedCategory === "NEKRETNINE" && alert.propertyType) {
+    const propertyType = getPropertyTypeFromListing(listing);
+    if (propertyType !== alert.propertyType) return false;
+  }
+
+  if (!locationMatches(listing, alert.locationText)) {
+    return false;
+  }
+
+  if (alert.yearFrom !== null || alert.yearTo !== null) {
+    const year = getListingYear(listing);
+    if (year === null) return false;
+    if (alert.yearFrom !== null && year < alert.yearFrom) return false;
+    if (alert.yearTo !== null && year > alert.yearTo) return false;
+  }
+
+  if (alert.kmFrom !== null || alert.kmTo !== null) {
+    const km = getListingKm(listing);
+    if (km === null) return false;
+    if (alert.kmFrom !== null && km < alert.kmFrom) return false;
+    if (alert.kmTo !== null && km > alert.kmTo) return false;
+  }
+
+  // For "SVE" category, matching intentionally relies only on keywords.
+  if (normalizedCategory !== "SVE" && alert.priceMax && listing.price != null && listing.price > alert.priceMax) {
     return false;
   }
 
   if (alert.keywords.length > 0) {
-    const titleLower = listing.title.toLowerCase();
+    const titleLower = normalizeForMatch(listing.title);
     const allMatch = alert.keywords.every((kw) =>
-      titleLower.includes(kw.toLowerCase()),
+      titleLower.includes(normalizeForMatch(kw)),
     );
     if (!allMatch) return false;
   }
@@ -251,10 +395,24 @@ function extractListingImageUrl(listing: ListingRow): string | null {
 export async function matchAndNotify(listings: ListingRow[]): Promise<void> {
   if (listings.length === 0) return;
 
-  const alerts = (await prisma.alert.findMany({
+  const alerts = await prisma.alert.findMany({
     where: { isActive: true },
-    include: { device: true },
-  })) as AlertWithDevice[];
+    select: {
+      id: true,
+      deviceId: true,
+      category: true,
+      keywords: true,
+      priceMax: true,
+      locationText: true,
+      propertyType: true,
+      yearFrom: true,
+      yearTo: true,
+      kmFrom: true,
+      kmTo: true,
+      isActive: true,
+      device: { select: { expoPushToken: true } },
+    },
+  }) as AlertWithDevice[];
 
   if (alerts.length === 0) return;
 

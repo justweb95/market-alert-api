@@ -5,6 +5,7 @@ import { facebookPagesRouter } from "./features/facebookPages/facebookPages.rout
 import { kpPagesRouter } from "./features/kpPages/kpPages.routes.js";
 import { paPagesRouter } from "./features/paPages/paPages.routes.js";
 import { notificationRouter } from "./features/notification/notification.routes.js";
+import { subscriptionRouter } from "./features/subscription/subscription.routes.js";
 import { Queue } from "bullmq";
 import { startSchedulers } from "./jobs/scheduler.js";
 import { redisConnection } from "./jobs/redis.js";
@@ -20,6 +21,7 @@ app.use('/api/kp/', kpPagesRouter);
 // PolovniAutomobili API routes
 app.use('/api/pa/', paPagesRouter);
 app.use('/api/notifications', notificationRouter);
+app.use('/api/subscription', subscriptionRouter);
 installErrorHandler();
 app.listen(port, "0.0.0.0", () => {
     console.log(`API listening on http://localhost:${port}`);

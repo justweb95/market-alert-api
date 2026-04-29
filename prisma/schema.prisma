@@ -19,29 +19,57 @@ enum PlanTier {
   GOLD
 }
 
-model User {
-  id        String   @id @default(cuid())
-  firstName String
-  lastName  String
-  email     String   @unique
-  passwordHash String
-  planTier  PlanTier @default(FREE)
-  promoCodeUsed String?
-  promoRedeemedAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAUSED
+  EXPIRED
+  CANCELLED
+}
 
-  devices Device[]
+model User {
+  id              String    @id @default(cuid())
+  firstName       String
+  lastName        String
+  email           String    @unique
+  passwordHash    String
+  planTier        PlanTier  @default(FREE)
+  promoCodeUsed   String?
+  promoRedeemedAt DateTime?
+  trialStartedAt  DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  devices      Device[]
+  subscription Subscription?
+}
+
+model Subscription {
+  id           String             @id @default(cuid())
+  userId       String             @unique
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tier         PlanTier
+  status       SubscriptionStatus @default(ACTIVE)
+  revenuecatId String?
+  productId    String?
+  startedAt    DateTime           @default(now())
+  renewsAt     DateTime?
+  pausedAt     DateTime?
+  cancelledAt  DateTime?
+  updatedAt    DateTime           @updatedAt
+
+  @@index([revenuecatId])
 }
 
 model Device {
-  id            String   @id @default(cuid())
-  expoPushToken String   @unique
-  platform      Platform
-  userId        String?
-  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  createdAt     DateTime @default(now())
-  lastSeenAt    DateTime @updatedAt
+  id             String   @id @default(cuid())
+  expoPushToken  String   @unique
+  platform       Platform
+  userId         String?
+  user           User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  trialStartedAt DateTime?
+  createdAt      DateTime @default(now())
+  lastSeenAt     DateTime @updatedAt
 
   alerts        Alert[]
   notifications Notification[]
@@ -56,8 +84,13 @@ model Alert {
 
   category     String
   locationText String
-  priceMax     Int
+  priceMax     Int?
   keywords     String[]
+  propertyType String?
+  yearFrom     Int?
+  yearTo       Int?
+  kmFrom       Int?
+  kmTo         Int?
   isActive     Boolean  @default(true)
 
   createdAt DateTime @default(now())

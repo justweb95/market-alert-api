@@ -1,6 +1,7 @@
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { prisma } from "../../db/prisma.js";
 import { sendExpoPushNotification } from "./expoPush.service.js";
+const TRIAL_DAYS = 7;
 const FREE_BRONZE_CODE = "03081995";
 const TIER_ALERT_LIMIT = {
     FREE: 0,
@@ -31,6 +32,14 @@ function normalizePlatform(platform) {
 function getSingleString(value) {
     return typeof value === "string" && value.trim() ? value.trim() : null;
 }
+function getOptionalInt(value) {
+    if (value === null || value === undefined || value === "")
+        return null;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed))
+        return null;
+    return Math.trunc(parsed);
+}
 function normalizeEmail(value) {
     return value.trim().toLowerCase();
 }
@@ -54,6 +63,18 @@ function verifyPassword(password, hashed) {
 function getTierAlertLimit(tier) {
     return TIER_ALERT_LIMIT[tier] ?? TIER_ALERT_LIMIT.FREE;
 }
+function computeTrialStatus(trialStartedAt) {
+    if (!trialStartedAt) {
+        return { trialActive: true, trialDaysLeft: TRIAL_DAYS, trialExpiredAt: null };
+    }
+    const expiredAt = new Date(trialStartedAt.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    const trialActive = now < expiredAt;
+    const trialDaysLeft = trialActive
+        ? Math.ceil((expiredAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
+        : 0;
+    return { trialActive, trialDaysLeft, trialExpiredAt: expiredAt };
+}
 async function buildProfilePayload(deviceId) {
     const device = await prisma.device.findUnique({
         where: { id: deviceId },
@@ -67,6 +88,18 @@ async function buildProfilePayload(deviceId) {
                     planTier: true,
                     promoCodeUsed: true,
                     promoRedeemedAt: true,
+                    trialStartedAt: true,
+                    subscription: {
+                        select: {
+                            tier: true,
+                            status: true,
+                            productId: true,
+                            startedAt: true,
+                            renewsAt: true,
+                            pausedAt: true,
+                            cancelledAt: true,
+                        },
+                    },
                 },
             },
         },
@@ -75,20 +108,56 @@ async function buildProfilePayload(deviceId) {
         return null;
     const planTier = (device.user?.planTier ?? "FREE");
     const isDrugarskiActive = device.user?.promoCodeUsed === FREE_BRONZE_CODE;
+    // Resolve trial start: prefer user-level (tied to email) over device-level
+    const trialStartedAt = device.user?.trialStartedAt ?? device.trialStartedAt;
+    const { trialActive, trialDaysLeft, trialExpiredAt } = computeTrialStatus(trialStartedAt);
+    const sub = device.user?.subscription ?? null;
+    const subscriptionStatus = (sub?.status ?? null);
+    const hasActiveSub = subscriptionStatus === "ACTIVE";
+    // Effective limit: drugarski > paid subscription > trial (Bronze-equivalent) > FREE (locked)
     const effectiveAlertLimit = isDrugarskiActive
         ? 5
-        : getTierAlertLimit(planTier);
+        : hasActiveSub
+            ? getTierAlertLimit(planTier)
+            : trialActive
+                ? getTierAlertLimit("BRONZE") // trial = 3 alerts (Bronze)
+                : 0; // locked
+    const isLocked = !trialActive && !isDrugarskiActive && !hasActiveSub;
     const signalCount = device.user?.id
         ? await prisma.alert.count({ where: { device: { userId: device.user.id } } })
         : await prisma.alert.count({ where: { deviceId } });
     return {
         deviceId: device.id,
-        user: device.user,
+        user: device.user
+            ? {
+                id: device.user.id,
+                firstName: device.user.firstName,
+                lastName: device.user.lastName,
+                email: device.user.email,
+                planTier: device.user.planTier,
+                promoCodeUsed: device.user.promoCodeUsed,
+                promoRedeemedAt: device.user.promoRedeemedAt,
+            }
+            : null,
         planTier,
         alertLimit: effectiveAlertLimit,
         signalCount,
         pricingPlans: PRICING_PLANS,
         freeBronzeCode: FREE_BRONZE_CODE,
+        trialActive,
+        trialDaysLeft,
+        trialExpiredAt: trialExpiredAt?.toISOString() ?? null,
+        isLocked,
+        subscription: sub
+            ? {
+                tier: sub.tier,
+                status: sub.status,
+                productId: sub.productId,
+                startedAt: sub.startedAt.toISOString(),
+                renewsAt: sub.renewsAt?.toISOString() ?? null,
+                pausedAt: sub.pausedAt?.toISOString() ?? null,
+            }
+            : null,
     };
 }
 // POST /api/notifications/devices
@@ -184,6 +253,7 @@ export async function registerDevice(req, res) {
                 data: {
                     expoPushToken,
                     platform: normalizedPlatform,
+                    trialStartedAt: new Date(),
                     ...(resolvedUserId ? { userId: resolvedUserId } : {}),
                 },
             });
@@ -204,40 +274,97 @@ export async function createAlert(req, res) {
     const rawKeywords = Array.isArray(req.body?.keywords) ? req.body.keywords : [];
     const keywords = rawKeywords.filter((keyword) => typeof keyword === "string" && keyword.trim().length > 0);
     const rawPriceMax = Number(req.body?.priceMax);
-    const priceMax = Number.isFinite(rawPriceMax) ? rawPriceMax : null;
+    const priceMax = Number.isFinite(rawPriceMax) ? Math.round(rawPriceMax) : null;
     const locationText = getSingleString(req.body?.locationText) ?? "";
-    if (!deviceId || !category || !priceMax) {
+    const propertyTypeInput = getSingleString(req.body?.propertyType)?.toUpperCase() ?? null;
+    const yearFrom = getOptionalInt(req.body?.yearFrom);
+    const yearTo = getOptionalInt(req.body?.yearTo);
+    const kmFrom = getOptionalInt(req.body?.kmFrom);
+    const kmTo = getOptionalInt(req.body?.kmTo);
+    const normalizedCategory = category?.toUpperCase() ?? null;
+    const isAllCategory = normalizedCategory === "SVE";
+    const allowedPropertyTypes = new Set(["STAN", "LOKAL", "PARCELA"]);
+    const propertyType = propertyTypeInput && allowedPropertyTypes.has(propertyTypeInput)
+        ? propertyTypeInput
+        : null;
+    if (!deviceId || !normalizedCategory) {
         return res
             .status(400)
-            .json({ error: "deviceId, category i priceMax su obavezni" });
+            .json({ error: "deviceId i category su obavezni" });
+    }
+    if (!isAllCategory && (!priceMax || priceMax <= 0)) {
+        return res.status(400).json({ error: "priceMax je obavezan i mora biti veci od 0" });
+    }
+    if (isAllCategory && keywords.length === 0) {
+        return res.status(400).json({ error: "Za kategoriju SVE potrebno je uneti kljucne reci" });
+    }
+    if (normalizedCategory === "NEKRETNINE" && !propertyType) {
+        return res.status(400).json({
+            error: "Za nekretnine je obavezno izabrati tip: stan, lokal ili parcela/zemljiste",
+        });
+    }
+    if (yearFrom !== null && yearTo !== null && yearFrom > yearTo) {
+        return res.status(400).json({ error: "Godiste od ne moze biti vece od godista do" });
+    }
+    if (kmFrom !== null && kmTo !== null && kmFrom > kmTo) {
+        return res.status(400).json({ error: "Kilometraza od ne moze biti veca od kilometraze do" });
     }
     const device = await prisma.device.findUnique({
         where: { id: deviceId },
-        select: { id: true, userId: true, user: { select: { planTier: true, promoCodeUsed: true } } },
+        select: {
+            id: true,
+            userId: true,
+            trialStartedAt: true,
+            user: {
+                select: {
+                    planTier: true,
+                    promoCodeUsed: true,
+                    trialStartedAt: true,
+                    subscription: { select: { status: true } },
+                },
+            },
+        },
     });
     if (!device) {
         return res.status(404).json({ error: "Uredjaj nije pronadjen" });
     }
     const planTier = (device.user?.planTier ?? "FREE");
     const isDrugarskiActive = device.user?.promoCodeUsed === FREE_BRONZE_CODE;
-    const maxAlerts = isDrugarskiActive ? 5 : getTierAlertLimit(planTier);
+    const trialStart = device.user?.trialStartedAt ?? device.trialStartedAt;
+    const { trialActive } = computeTrialStatus(trialStart);
+    const hasActiveSub = device.user?.subscription?.status === "ACTIVE";
+    const maxAlerts = isDrugarskiActive
+        ? 5
+        : hasActiveSub
+            ? getTierAlertLimit(planTier)
+            : trialActive
+                ? getTierAlertLimit("BRONZE")
+                : 0;
+    if (maxAlerts === 0) {
+        return res.status(403).json({
+            error: "Probni period je istekao. Kupi plan ili unesi promo kod.",
+        });
+    }
     const count = device.userId
         ? await prisma.alert.count({ where: { device: { userId: device.userId } } })
         : await prisma.alert.count({ where: { deviceId } });
     if (count >= maxAlerts) {
         return res.status(400).json({
-            error: maxAlerts === 0
-                ? "FREE plan je zakljucan. Aktiviraj kod ili sacekaj planove."
-                : `Maksimalan broj signala za ${planTier} plan je ${maxAlerts}`,
+            error: `Dostignut maksimalan broj signala (${maxAlerts}) za tvoj plan.`,
         });
     }
     const alert = await prisma.alert.create({
         data: {
             deviceId,
-            category,
+            category: normalizedCategory,
             keywords: keywords ?? [],
-            priceMax,
+            priceMax: isAllCategory ? 0 : priceMax,
             locationText: locationText ?? "",
+            propertyType: normalizedCategory === "NEKRETNINE" ? propertyType : null,
+            yearFrom,
+            yearTo,
+            kmFrom,
+            kmTo,
         },
     });
     return res.status(201).json(alert);
@@ -459,12 +586,14 @@ export async function updateProfile(req, res) {
             userId = linked.userId;
         }
         else {
+            // New user: inherit the device's trialStartedAt so reinstall doesn't reset trial
             const created = await prisma.user.create({
                 data: {
                     firstName,
                     lastName,
                     email: normalizedEmail,
                     passwordHash: hashPassword(password),
+                    trialStartedAt: device.trialStartedAt ?? new Date(),
                 },
             });
             const linked = await prisma.device.update({

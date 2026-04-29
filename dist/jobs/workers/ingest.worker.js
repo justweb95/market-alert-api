@@ -4,7 +4,7 @@ import { redisConnection } from '../redis.js';
 import { prisma } from '../../db/prisma.js';
 import { matchAndNotify } from '../../features/notification/matcher.js';
 import { scrapeKpLatest } from '../../features/kpPages/kpPages.scraper.js';
-import { scrapePaLatestCars, scrapePaLatestMotos } from '../../features/paPages/paPages.scraper.js';
+import { scrapePaLatestCars, scrapePaLatestMotos, scrapePaMotoPartsAndEquipmentBeta, } from '../../features/paPages/paPages.scraper.js';
 import { scrapeFacebookGroupsLatest, scrapeFacebookMarketplaceLatest, } from '../../features/facebookPages/facebookSources.scraper.js';
 function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
@@ -80,6 +80,9 @@ export const ingestWorker = new Worker('ingest', async (job) => {
     let kp = { listings: [] };
     let paCars = { listings: [] };
     let paMotos = { listings: [] };
+    let paMotoPartsBeta = {
+        listings: [],
+    };
     let fbGroups = { listings: [] };
     let fbMarketplace = {
         listings: [],
@@ -103,6 +106,12 @@ export const ingestWorker = new Worker('ingest', async (job) => {
         console.error('[ingest] PA motos scrape failed', error);
     }
     try {
+        paMotoPartsBeta = await scrapePaMotoPartsAndEquipmentBeta({ take });
+    }
+    catch (error) {
+        console.error('[ingest] PA moto parts beta scrape failed', error);
+    }
+    try {
         fbGroups = await scrapeFacebookGroupsLatest({ take });
     }
     catch (error) {
@@ -118,6 +127,7 @@ export const ingestWorker = new Worker('ingest', async (job) => {
         kp: kp.listings.length,
         paCars: paCars.listings.length,
         paMotos: paMotos.listings.length,
+        paMotoPartsBeta: paMotoPartsBeta.listings.length,
         fbGroups: fbGroups.listings.length,
         fbMarketplace: fbMarketplace.listings.length,
     });
@@ -130,6 +140,7 @@ export const ingestWorker = new Worker('ingest', async (job) => {
         upserted += await upsertListingsBySource('kp', kp.listings);
         upserted += await upsertListingsBySource('pa-car', paCars.listings);
         upserted += await upsertListingsBySource('pa-moto', paMotos.listings);
+        upserted += await upsertListingsBySource('pa-moto-parts-beta', paMotoPartsBeta.listings);
         upserted += await upsertListingsBySource('fb-group', fbGroups.listings);
         upserted += await upsertListingsBySource('fb-marketplace', fbMarketplace.listings);
         console.log('[ingest] upserted', upserted);
@@ -138,6 +149,7 @@ export const ingestWorker = new Worker('ingest', async (job) => {
             ...kp.listings.map((x) => ({ source: 'kp', externalId: String(x.id) })),
             ...paCars.listings.map((x) => ({ source: 'pa-car', externalId: String(x.id) })),
             ...paMotos.listings.map((x) => ({ source: 'pa-moto', externalId: String(x.id) })),
+            ...paMotoPartsBeta.listings.map((x) => ({ source: 'pa-moto-parts-beta', externalId: String(x.id) })),
             ...fbGroups.listings.map((x) => ({ source: 'fb-group', externalId: String(x.id) })),
             ...fbMarketplace.listings.map((x) => ({ source: 'fb-marketplace', externalId: String(x.id) })),
         ];
