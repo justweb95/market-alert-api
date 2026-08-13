@@ -1,0 +1,7 @@
+-- Reconstructed 2026-07-11: this migration was recorded as applied to the dev
+-- database on 2026-03-22 but its file was never committed to git and could not
+-- be recovered from git history. Its schema effects are fully covered by other
+-- already-committed migrations (Device.userId / Device.trialStartedAt /
+-- User.trialStartedAt all trace to 20260424143000_user_profiles_and_tiers and
+-- 20260429140000_subscriptions instead). Kept as a no-op placeholder so local
+-- migration history matches the database's applied-migrations record.

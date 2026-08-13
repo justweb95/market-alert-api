@@ -28,17 +28,20 @@ enum SubscriptionStatus {
 }
 
 model User {
-  id              String    @id @default(cuid())
-  firstName       String
-  lastName        String
-  email           String    @unique
-  passwordHash    String
-  planTier        PlanTier  @default(FREE)
-  promoCodeUsed   String?
-  promoRedeemedAt DateTime?
-  trialStartedAt  DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  id                        String    @id @default(cuid())
+  firstName                 String
+  lastName                  String
+  email                     String    @unique
+  passwordHash              String
+  planTier                  PlanTier  @default(FREE)
+  promoCodeUsed             String?
+  promoRedeemedAt           DateTime?
+  trialStartedAt            DateTime?
+  emailVerified             Boolean   @default(false)
+  emailVerifyToken          String?   @unique
+  emailVerifyTokenExpiresAt DateTime?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 
   devices      Device[]
   subscription Subscription?
@@ -99,6 +102,10 @@ model Alert {
   notificationLogs NotificationLog[]
 
   @@index([deviceId])
+  @@index([isActive])
+  @@index([category])
+  @@index([isActive, category])
+  @@index([createdAt])
 }
 
 model Listing {
@@ -106,7 +113,7 @@ model Listing {
   source       String
   externalId   String
   title        String
-  price        Int?
+  price        Float?
   locationText String?
   url          String
   postedAt     DateTime?
@@ -154,6 +161,9 @@ model Notification {
   seenAt    DateTime?
 
   @@index([deviceId, status])
+  @@index([alertId])
+  @@index([listingId])
+  @@index([alertId, listingId])
   @@index([createdAt])
 }
 

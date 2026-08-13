@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+    cancelPromoCode,
     createAlert,
     deleteAlert,
     getAlerts,
@@ -11,18 +12,34 @@ import {
     sendTestNotification,
     toggleAlert,
     updateProfile,
+    verifyEmail,
 } from "./notification.controller.js";
+import {
+    validateRequest,
+} from "../../lib/validation-middleware.js";
+import {
+    registerDeviceSchema,
+    createAlertSchema,
+} from "../../lib/validation.js";
+import {
+    deviceRegistrationLimiter,
+    createAlertLimiter,
+    promoCodLimiter,
+    testNotificationLimiter,
+} from "../../lib/rate-limit.js";
 
 export const notificationRouter = Router();
 
-notificationRouter.post("/devices", registerDevice);
-notificationRouter.post("/alerts", createAlert);
+notificationRouter.post("/devices", deviceRegistrationLimiter, validateRequest(registerDeviceSchema), registerDevice);
+notificationRouter.post("/alerts", createAlertLimiter, validateRequest(createAlertSchema), createAlert);
 notificationRouter.get("/alerts/:deviceId", getAlerts);
 notificationRouter.patch("/alerts/:id/toggle", toggleAlert);
 notificationRouter.delete("/alerts/:id", deleteAlert);
-notificationRouter.post("/test", sendTestNotification);
+notificationRouter.post("/test", testNotificationLimiter, sendTestNotification);
 notificationRouter.get("/pending/:deviceId", getPendingNotifications);
 notificationRouter.patch("/:id/seen", markNotificationAsSeen);
 notificationRouter.get("/profile/:deviceId", getProfile);
 notificationRouter.patch("/profile/:deviceId", updateProfile);
-notificationRouter.post("/promo/redeem", redeemPromoCode);
+notificationRouter.post("/promo/redeem", promoCodLimiter, redeemPromoCode);
+notificationRouter.post("/promo/cancel", promoCodLimiter, cancelPromoCode);
+notificationRouter.get("/verify-email", verifyEmail);

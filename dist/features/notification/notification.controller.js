@@ -1,8 +1,21 @@
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { prisma } from "../../db/prisma.js";
 import { sendExpoPushNotification } from "./expoPush.service.js";
+import { backfillMatchForAlert } from "./matcher.js";
+import { FREE_BRONZE_CODE } from "../../lib/constants.js";
+import { sendVerificationEmail } from "../../lib/email.service.js";
+function hasPaidAccess(subscription) {
+    if (!subscription)
+        return false;
+    if (subscription.status === "ACTIVE")
+        return true;
+    if (subscription.status === "CANCELLED" && subscription.renewsAt) {
+        return subscription.renewsAt.getTime() > Date.now();
+    }
+    return false;
+}
 const TRIAL_DAYS = 7;
-const FREE_BRONZE_CODE = "03081995";
+const MAX_DEVICES_PER_USER = 2;
 const TIER_ALERT_LIMIT = {
     FREE: 0,
     BRONZE: 3,
@@ -75,6 +88,26 @@ function computeTrialStatus(trialStartedAt) {
         : 0;
     return { trialActive, trialDaysLeft, trialExpiredAt: expiredAt };
 }
+async function freeUserDeviceSlot(userId, currentDeviceId) {
+    const linkedDevices = await prisma.device.findMany({
+        where: { userId },
+        select: { id: true, lastSeenAt: true },
+        orderBy: [{ lastSeenAt: "asc" }, { createdAt: "asc" }],
+    });
+    const alreadyLinked = linkedDevices.some((device) => device.id === currentDeviceId);
+    if (alreadyLinked || linkedDevices.length < MAX_DEVICES_PER_USER) {
+        return null;
+    }
+    const oldestDevice = linkedDevices[0];
+    if (!oldestDevice) {
+        return null;
+    }
+    await prisma.device.update({
+        where: { id: oldestDevice.id },
+        data: { userId: null },
+    });
+    return oldestDevice.id;
+}
 async function buildProfilePayload(deviceId) {
     const device = await prisma.device.findUnique({
         where: { id: deviceId },
@@ -85,6 +118,7 @@ async function buildProfilePayload(deviceId) {
                     firstName: true,
                     lastName: true,
                     email: true,
+                    emailVerified: true,
                     planTier: true,
                     promoCodeUsed: true,
                     promoRedeemedAt: true,
@@ -106,14 +140,16 @@ async function buildProfilePayload(deviceId) {
     });
     if (!device)
         return null;
-    const planTier = (device.user?.planTier ?? "FREE");
-    const isDrugarskiActive = device.user?.promoCodeUsed === FREE_BRONZE_CODE;
+    const user = device.user ?? null;
+    const planTier = (user?.planTier ?? "FREE");
+    const isDrugarskiActive = user?.promoCodeUsed === FREE_BRONZE_CODE;
     // Resolve trial start: prefer user-level (tied to email) over device-level
-    const trialStartedAt = device.user?.trialStartedAt ?? device.trialStartedAt;
+    const userTrialStartedAt = device.user?.trialStartedAt ?? null;
+    const deviceTrialStartedAt = device.trialStartedAt ?? null;
+    const trialStartedAt = userTrialStartedAt ?? deviceTrialStartedAt;
     const { trialActive, trialDaysLeft, trialExpiredAt } = computeTrialStatus(trialStartedAt);
-    const sub = device.user?.subscription ?? null;
-    const subscriptionStatus = (sub?.status ?? null);
-    const hasActiveSub = subscriptionStatus === "ACTIVE";
+    const sub = (device.user?.subscription ?? null);
+    const hasActiveSub = hasPaidAccess(sub);
     // Effective limit: drugarski > paid subscription > trial (Bronze-equivalent) > FREE (locked)
     const effectiveAlertLimit = isDrugarskiActive
         ? 5
@@ -123,20 +159,21 @@ async function buildProfilePayload(deviceId) {
                 ? getTierAlertLimit("BRONZE") // trial = 3 alerts (Bronze)
                 : 0; // locked
     const isLocked = !trialActive && !isDrugarskiActive && !hasActiveSub;
-    const signalCount = device.user?.id
-        ? await prisma.alert.count({ where: { device: { userId: device.user.id } } })
+    const signalCount = user?.id
+        ? await prisma.alert.count({ where: { device: { userId: user.id } } })
         : await prisma.alert.count({ where: { deviceId } });
     return {
         deviceId: device.id,
-        user: device.user
+        user: user
             ? {
-                id: device.user.id,
-                firstName: device.user.firstName,
-                lastName: device.user.lastName,
-                email: device.user.email,
-                planTier: device.user.planTier,
-                promoCodeUsed: device.user.promoCodeUsed,
-                promoRedeemedAt: device.user.promoRedeemedAt,
+                id: user.id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                email: user.email,
+                emailVerified: user.emailVerified,
+                planTier: user.planTier,
+                promoCodeUsed: user.promoCodeUsed,
+                promoRedeemedAt: user.promoRedeemedAt,
             }
             : null,
         planTier,
@@ -186,6 +223,7 @@ export async function registerDevice(req, res) {
     }
     try {
         let resolvedUserId = null;
+        let displacedDeviceId = null;
         if (hasAnyUserField && firstName && lastName && email && password) {
             const normalizedEmail = normalizeEmail(email);
             const existingUser = await prisma.user.findUnique({
@@ -205,15 +243,25 @@ export async function registerDevice(req, res) {
                 resolvedUserId = updatedUser.id;
             }
             else {
+                const emailVerifyToken = randomBytes(32).toString("hex");
                 const createdUser = await prisma.user.create({
                     data: {
                         firstName,
                         lastName,
                         email: normalizedEmail,
                         passwordHash: hashPassword(password),
+                        emailVerifyToken,
+                        emailVerifyTokenExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
                     },
                 });
                 resolvedUserId = createdUser.id;
+                // Ne cekamo slanje mail-a — ako Gmail spori ili padne, registracija
+                // naloga ne sme da se zaglavi/pukne zbog toga.
+                void sendVerificationEmail({
+                    to: normalizedEmail,
+                    firstName,
+                    token: emailVerifyToken,
+                });
             }
         }
         let device = null;
@@ -225,7 +273,6 @@ export async function registerDevice(req, res) {
                     data: {
                         expoPushToken,
                         platform: normalizedPlatform,
-                        ...(resolvedUserId ? { userId: resolvedUserId } : {}),
                         lastSeenAt: new Date(),
                     },
                 });
@@ -238,11 +285,6 @@ export async function registerDevice(req, res) {
                     where: { id: existingByToken.id },
                     data: {
                         platform: normalizedPlatform,
-                        ...(resolvedUserId
-                            ? { userId: resolvedUserId }
-                            : existingByToken.userId
-                                ? { userId: existingByToken.userId }
-                                : {}),
                         lastSeenAt: new Date(),
                     },
                 });
@@ -254,12 +296,28 @@ export async function registerDevice(req, res) {
                     expoPushToken,
                     platform: normalizedPlatform,
                     trialStartedAt: new Date(),
-                    ...(resolvedUserId ? { userId: resolvedUserId } : {}),
                 },
             });
         }
+        if (resolvedUserId && device) {
+            displacedDeviceId = await freeUserDeviceSlot(resolvedUserId, device.id);
+            if (device.userId !== resolvedUserId) {
+                device = await prisma.device.update({
+                    where: { id: device.id },
+                    data: {
+                        userId: resolvedUserId,
+                        lastSeenAt: new Date(),
+                    },
+                });
+            }
+        }
         const profile = await buildProfilePayload(device.id);
-        return res.status(200).json({ ...device, profile });
+        return res.status(200).json({
+            ...device,
+            displacedDeviceId,
+            maxDevicesPerUser: MAX_DEVICES_PER_USER,
+            profile,
+        });
     }
     catch (error) {
         const message = error instanceof Error ? error.message : "Nepoznata greska";
@@ -320,7 +378,17 @@ export async function createAlert(req, res) {
                     planTier: true,
                     promoCodeUsed: true,
                     trialStartedAt: true,
-                    subscription: { select: { status: true } },
+                    subscription: {
+                        select: {
+                            tier: true,
+                            status: true,
+                            productId: true,
+                            startedAt: true,
+                            renewsAt: true,
+                            pausedAt: true,
+                            cancelledAt: true,
+                        },
+                    },
                 },
             },
         },
@@ -328,11 +396,13 @@ export async function createAlert(req, res) {
     if (!device) {
         return res.status(404).json({ error: "Uredjaj nije pronadjen" });
     }
-    const planTier = (device.user?.planTier ?? "FREE");
-    const isDrugarskiActive = device.user?.promoCodeUsed === FREE_BRONZE_CODE;
-    const trialStart = device.user?.trialStartedAt ?? device.trialStartedAt;
+    const user = device.user ?? null;
+    const planTier = (user?.planTier ?? "FREE");
+    const isDrugarskiActive = user?.promoCodeUsed === FREE_BRONZE_CODE;
+    const deviceTrialStartedAt = device.trialStartedAt ?? null;
+    const trialStart = user?.trialStartedAt ?? deviceTrialStartedAt;
     const { trialActive } = computeTrialStatus(trialStart);
-    const hasActiveSub = device.user?.subscription?.status === "ACTIVE";
+    const hasActiveSub = hasPaidAccess(user?.subscription ?? null);
     const maxAlerts = isDrugarskiActive
         ? 5
         : hasActiveSub
@@ -367,7 +437,11 @@ export async function createAlert(req, res) {
             kmTo,
         },
     });
-    return res.status(201).json(alert);
+    res.status(201).json(alert);
+    backfillMatchForAlert(alert.id).catch((error) => {
+        console.error("[notification] Backfill match failed for alert", alert.id, error);
+    });
+    return;
 }
 // GET /api/notifications/alerts/:deviceId
 export async function getAlerts(req, res) {
@@ -377,13 +451,19 @@ export async function getAlerts(req, res) {
     }
     const device = await prisma.device.findUnique({
         where: { id: deviceId },
-        select: { id: true },
+        select: { id: true, userId: true },
     });
     if (!device) {
         return res.status(404).json({ error: "Uredjaj nije pronadjen" });
     }
     const alerts = await prisma.alert.findMany({
-        where: { deviceId },
+        where: device.userId
+            ? {
+                device: {
+                    userId: device.userId,
+                },
+            }
+            : { deviceId },
         orderBy: { createdAt: "desc" },
     });
     return res.status(200).json(alerts);
@@ -561,7 +641,12 @@ export async function updateProfile(req, res) {
     }
     const device = await prisma.device.findUnique({
         where: { id: deviceId },
-        include: { user: true },
+        select: {
+            id: true,
+            userId: true,
+            trialStartedAt: true,
+            user: true,
+        },
     });
     if (!device) {
         return res.status(404).json({ error: "Uredjaj nije pronadjen" });
@@ -593,7 +678,7 @@ export async function updateProfile(req, res) {
                     lastName,
                     email: normalizedEmail,
                     passwordHash: hashPassword(password),
-                    trialStartedAt: device.trialStartedAt ?? new Date(),
+                    trialStartedAt: (device.trialStartedAt ?? new Date()),
                 },
             });
             const linked = await prisma.device.update({
@@ -659,5 +744,58 @@ export async function redeemPromoCode(req, res) {
     });
     const profile = await buildProfilePayload(deviceId);
     return res.status(200).json(profile);
+}
+// POST /api/notifications/promo/cancel
+export async function cancelPromoCode(req, res) {
+    const deviceId = getSingleString(req.body?.deviceId);
+    if (!deviceId) {
+        return res.status(400).json({ error: "deviceId je obavezan" });
+    }
+    const device = await prisma.device.findUnique({
+        where: { id: deviceId },
+        include: { user: true },
+    });
+    if (!device) {
+        return res.status(404).json({ error: "Uredjaj nije pronadjen" });
+    }
+    if (!device.userId) {
+        return res.status(400).json({ error: "Nalog nije povezan sa uredjajem" });
+    }
+    await prisma.user.update({
+        where: { id: device.userId },
+        data: {
+            promoCodeUsed: null,
+            promoRedeemedAt: null,
+        },
+    });
+    const profile = await buildProfilePayload(deviceId);
+    return res.status(200).json(profile);
+}
+// GET /api/notifications/verify-email?token=...
+// Korisnik klikne link iz mail-a — ne zahteva deviceId/auth, token je dovoljan
+// dokaz da je link stigao na tu email adresu.
+export async function verifyEmail(req, res) {
+    const token = getSingleString(req.query.token);
+    if (!token) {
+        return res.status(400).send("Nedostaje token za verifikaciju.");
+    }
+    const user = await prisma.user.findUnique({ where: { emailVerifyToken: token } });
+    if (!user) {
+        return res.status(400).send("Link za verifikaciju nije validan ili je vec iskoriscen.");
+    }
+    if (user.emailVerifyTokenExpiresAt && user.emailVerifyTokenExpiresAt.getTime() < Date.now()) {
+        return res.status(400).send("Link za verifikaciju je istekao. Zatrazi novi iz aplikacije.");
+    }
+    await prisma.user.update({
+        where: { id: user.id },
+        data: {
+            emailVerified: true,
+            emailVerifyToken: null,
+            emailVerifyTokenExpiresAt: null,
+        },
+    });
+    return res
+        .status(200)
+        .send("Email adresa je uspesno potvrdjena. Mozes da se vratis u aplikaciju.");
 }
 //# sourceMappingURL=notification.controller.js.map

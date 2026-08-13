@@ -1,135 +1,114 @@
-import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { parsePowerKwHp } from '../../helpers/paPages.helper.js';
-const STEALTH_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'sr-RS,sr;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    DNT: '1',
-    Connection: 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-};
+import { fetchPaHtml } from './paCloudflare.service.js';
+// The site's ad cards render everything the scraper needs into a single
+// <img alt="..."> string, e.g.:
+//   "Land Rover Range Rover Sport, 14.900 €, 2011. Džip/SUV, Dizel | 2993 cm3, 232.300 km, 180kW (245 KS), ..., Šid"
+//   "Kawasaki z800, 6.350 €, 2016. , 806 cm3, 32.470 km, 83kW (113 KS), Naked, Kragujevac"
+//   "SHARK navozi za ATV vozila, 280 €, Novo, Beograd"
+// "ARTICLE_SELECTOR" excludes the interleaved "emptyAd" ad-slot placeholders.
+const ARTICLE_SELECTOR = 'article[data-testid="featuredAd"], article[data-testid="newAd"]';
 function clampTake(input) {
     const n = Number(input ?? 20);
     return Number.isFinite(n) && n > 0 && n <= 50 ? n : 20;
 }
+function toAbsoluteUrl(href) {
+    const clean = href.split('?')[0] ?? '';
+    if (!clean)
+        return '';
+    return clean.startsWith('http')
+        ? clean
+        : `https://www.polovniautomobili.com${clean.startsWith('/') ? '' : '/'}${clean}`;
+}
+function splitTitlePriceRest(alt) {
+    const m = alt.match(/^(.*?),\s*([\d.,]+)\s*€,?\s*(.*)$/s);
+    if (!m)
+        return null;
+    return { title: (m[1] ?? '').trim(), priceEur: `${(m[2] ?? '').trim()} €`, rest: (m[3] ?? '').trim() };
+}
+function lastCsvSegment(text) {
+    const parts = text.split(',');
+    return parts[parts.length - 1]?.trim() ?? '';
+}
 export async function scrapePaLatestCars(opts) {
     const take = clampTake(opts?.take);
-    const timeoutMs = opts?.timeoutMs ?? 10_000;
     const targetUrl = process.env.PA_LATEST_CAR_URL ??
         'https://www.polovniautomobili.com/auto-oglasi/poslednja24h';
-    const { data: html } = await axios.get(targetUrl, {
-        headers: STEALTH_HEADERS,
-        timeout: timeoutMs,
-    });
+    const html = await fetchPaHtml(targetUrl);
     const $ = cheerio.load(html);
     const listings = [];
-    $('script[type="application/ld+json"]').each((_, el) => {
+    $(ARTICLE_SELECTOR).each((_, el) => {
         try {
-            const jsonLdRaw = $(el).html();
-            if (!jsonLdRaw)
-                return;
-            const jsonLd = JSON.parse(jsonLdRaw);
-            if (!Array.isArray(jsonLd) || !jsonLd[0])
-                return;
-            const car = jsonLd[0];
-            const idMatch = String(car.url || '').match(/auto-oglasi\/(\d+)/);
+            const article = $(el);
+            const href = article.find('a[href*="/auto-oglasi/"]').first().attr('href') ?? '';
+            const idMatch = href.match(/\/auto-oglasi\/(\d+)\//);
             if (!idMatch)
                 return;
-            const id = idMatch[1];
-            const article = $(`article[data-classifiedid="${id}"]`);
-            if (!article.length)
+            const img = article.find('img').first();
+            const alt = img.attr('alt') ?? '';
+            const parsed = splitTitlePriceRest(alt);
+            if (!parsed)
                 return;
-            const url = String(car.url || '');
-            const absoluteUrl = url.startsWith('http')
-                ? url
-                : `https://www.polovniautomobili.com${url.startsWith('/') ? '' : '/'}${url}`;
+            const detail = parsed.rest.match(/^(\d{4})\.\s*([^,]*),\s*([^|]+)\|\s*(\d+)\s*cm3,\s*([\d.,]+)\s*km,\s*\d+kW\s*\(\d+\s*KS\),\s*[^,]+,\s*\d+\/\d+\s*vrata,\s*\d+\s*sedišta,\s*(.+)$/);
             listings.push({
-                id: Number(id),
-                title: String(car.name ?? '').trim(),
-                url: absoluteUrl,
-                brand: String(car.brand ?? '').trim(),
-                model: String(car.model ?? '').trim(),
-                year: String(car.productionDate ?? '').trim(),
-                fuel: String(car.fuelType ?? '').trim(),
-                km: String(car.mileageFromOdometer ?? '').trim(),
-                priceEur: article.find('.price span').first().text().trim(),
-                city: article.find('.city').text().replace(/^.*?\s/i, '').trim(),
-                renewedAt: String(article.attr('data-renewdate') ?? '').trim(),
-                image: String(car.image ?? '').trim(),
+                id: Number(idMatch[1]),
+                title: parsed.title,
+                url: toAbsoluteUrl(href),
+                brand: '',
+                model: '',
+                year: detail?.[1] ?? '',
+                fuel: detail?.[3]?.trim() ?? '',
+                km: detail?.[5] ?? '',
+                priceEur: parsed.priceEur,
+                city: detail?.[6]?.trim() ?? lastCsvSegment(parsed.rest),
+                renewedAt: '',
+                image: img.attr('src') ?? '',
             });
         }
         catch {
             // ignore parse errors
         }
     });
-    const latest = listings.slice(-take);
+    const latest = listings.slice(0, take);
     return { take, count: latest.length, listings: latest };
 }
 export async function scrapePaLatestMotos(opts) {
     const take = clampTake(opts?.take);
-    const timeoutMs = opts?.timeoutMs ?? 10_000;
     const targetUrl = process.env.PA_LATEST_MOTO_URL ??
         'https://www.polovniautomobili.com/motori/poslednja24h';
-    const { data: html } = await axios.get(targetUrl, {
-        headers: STEALTH_HEADERS,
-        timeout: timeoutMs,
-    });
+    const html = await fetchPaHtml(targetUrl);
     const $ = cheerio.load(html);
     const listings = [];
-    $('script[type="application/ld+json"]').each((_, el) => {
+    $(ARTICLE_SELECTOR).each((_, el) => {
         try {
-            const raw = $(el).html();
-            if (!raw)
-                return;
-            const parsed = JSON.parse(raw);
-            if (!Array.isArray(parsed) || !parsed[0])
-                return;
-            const moto = parsed[0];
-            if (moto['@type'] !== 'Motorcycle')
-                return;
-            const urlStr = String(moto.url || '').trim();
-            const idMatch = urlStr.match(/\/motori\/(\d+)\//);
+            const article = $(el);
+            const href = article.find('a[href*="/motori/"]').first().attr('href') ?? '';
+            const idMatch = href.match(/\/motori\/(\d+)\//);
             if (!idMatch)
                 return;
-            const id = idMatch[1];
-            const article = $(`article.ad-${id}`);
-            if (!article.length)
+            const img = article.find('img').first();
+            const alt = img.attr('alt') ?? '';
+            const parsed = splitTitlePriceRest(alt);
+            if (!parsed)
                 return;
-            const title = String(moto.name || '').trim();
-            const priceEur = article.find('.price span').first().text().replace(/\s+/g, ' ').trim();
-            const city = article.find('.city').text().replace(/\s+/g, ' ').trim();
-            const set0Top = article.find('.info .setInfo').eq(0).find('.top').attr('title') || '';
-            const set0Bottom = article.find('.info .setInfo').eq(0).find('.bottom').attr('title') || '';
-            const year = set0Top.replace(/\s+/g, ' ').trim();
-            const ccm = set0Bottom.replace(/\s+/g, ' ').trim();
-            const set1Top = article.find('.info .setInfo').eq(1).find('.top').attr('title') || '';
-            const set1Bottom = article.find('.info .setInfo').eq(1).find('.bottom').attr('title') || '';
-            const km = set1Top.replace(/\s+/g, ' ').trim();
-            const powerText = set1Bottom.replace(/\s+/g, ' ').trim();
-            const { powerKw, powerHp } = parsePowerKwHp(powerText);
-            const set2Top = article.find('.info .setInfo').eq(2).find('.top').attr('title') || '';
-            const motoType = set2Top.replace(/\s+/g, ' ').trim();
-            const absoluteUrl = urlStr.startsWith('http')
-                ? urlStr
-                : `https://www.polovniautomobili.com${urlStr.startsWith('/') ? '' : '/'}${urlStr}`;
+            const detail = parsed.rest.match(/^(\d{4})\.\s*,\s*(\d+)\s*cm3,\s*([\d.,]+)\s*km,\s*(\d+kW\s*\(\d+\s*KS\)),\s*([^,]+),\s*(.+)$/);
+            const { powerKw, powerHp } = parsePowerKwHp(detail?.[4] ?? '');
             listings.push({
-                id: Number(id),
-                title,
-                url: absoluteUrl,
-                priceEur,
-                city,
-                brand: String(moto.brand || '').trim(),
-                model: String(moto.model || '').trim(),
-                year,
-                km,
-                ccm,
+                id: Number(idMatch[1]),
+                title: parsed.title,
+                url: toAbsoluteUrl(href),
+                priceEur: parsed.priceEur,
+                city: detail?.[6]?.trim() ?? lastCsvSegment(parsed.rest),
+                brand: '',
+                model: '',
+                year: detail?.[1] ?? '',
+                km: detail?.[3] ?? '',
+                ccm: detail?.[2] ? `${detail[2]} cm3` : '',
                 powerKw,
                 powerHp,
-                motoType,
-                image: String(moto.image || '').trim(),
-                renewedAt: String(article.attr('data-renewdate') || '').trim(),
+                motoType: detail?.[5]?.trim() ?? '',
+                image: img.attr('src') ?? '',
+                renewedAt: '',
             });
         }
         catch {
@@ -141,51 +120,39 @@ export async function scrapePaLatestMotos(opts) {
 }
 export async function scrapePaMotoPartsAndEquipmentBeta(opts) {
     const take = clampTake(opts?.take);
-    const timeoutMs = opts?.timeoutMs ?? 10_000;
     const targetUrl = process.env.PA_MOTO_PARTS_URL ??
         'https://www.polovniautomobili.com/delovi-i-oprema/motori/moto-delovi-i-oprema/pretraga?text_search=&submit=';
-    const { data: html } = await axios.get(targetUrl, {
-        headers: STEALTH_HEADERS,
-        timeout: timeoutMs,
-    });
+    const html = await fetchPaHtml(targetUrl);
     const $ = cheerio.load(html);
     const listings = [];
-    $('script[type="application/ld+json"]').each((_, el) => {
+    $(ARTICLE_SELECTOR).each((_, el) => {
         try {
-            const raw = $(el).html();
-            if (!raw)
-                return;
-            const parsed = JSON.parse(raw);
-            if (!Array.isArray(parsed) || !parsed[0])
-                return;
-            const item = parsed[0];
-            const title = String(item.name ?? '').trim();
-            const urlStr = String(item.url ?? '').trim();
-            if (!title || !urlStr)
-                return;
-            const idMatch = urlStr.match(/\/(\d+)(?:\/|$)/);
+            const article = $(el);
+            const href = article.find('a[href*="/moto-delovi-i-oprema/"]').first().attr('href') ?? '';
+            const idMatch = href.match(/\/moto-delovi-i-oprema\/(\d+)\//);
             if (!idMatch)
                 return;
             const id = Number(idMatch[1]);
             if (!Number.isFinite(id))
                 return;
-            const absoluteUrl = urlStr.startsWith('http')
-                ? urlStr
-                : `https://www.polovniautomobili.com${urlStr.startsWith('/') ? '' : '/'}${urlStr}`;
-            const article = $(`article.ad-${id}, article[data-classifiedid="${id}"]`).first();
-            const articleText = article.text().replace(/\s+/g, ' ').trim().toLowerCase();
-            const listingType = /(oprema|kaciga|jakna|rukavice|cizme|protektor)/.test(articleText) ||
-                /(oprema|kaciga|jakna|rukavice|cizme|protektor)/.test(title.toLowerCase())
+            const img = article.find('img').first();
+            const alt = img.attr('alt') ?? '';
+            const parsed = splitTitlePriceRest(alt);
+            if (!parsed)
+                return;
+            const city = lastCsvSegment(parsed.rest);
+            const combinedText = `${parsed.title} ${parsed.rest}`.toLowerCase();
+            const listingType = /(oprema|kaciga|jakna|rukavice|cizme|protektor)/.test(combinedText)
                 ? 'MOTO_EQUIPMENT'
                 : 'MOTO_PART';
             listings.push({
                 id,
-                title,
-                url: absoluteUrl,
-                priceEur: article.find('.price span').first().text().replace(/\s+/g, ' ').trim(),
-                city: article.find('.city').text().replace(/\s+/g, ' ').trim(),
-                image: String(item.image ?? '').trim(),
-                renewedAt: String(article.attr('data-renewdate') ?? '').trim(),
+                title: parsed.title,
+                url: toAbsoluteUrl(href),
+                priceEur: parsed.priceEur,
+                city,
+                image: img.attr('src') ?? '',
+                renewedAt: '',
                 listingType,
             });
         }

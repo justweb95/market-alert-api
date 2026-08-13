@@ -1,13 +1,33 @@
 // src/jobs/workers/ingest.worker.ts
 import { Worker } from 'bullmq';
+import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { redisConnection } from '../redis.js';
 import { prisma } from '../../db/prisma.js';
 import { matchAndNotify } from '../../features/notification/matcher.js';
+import { normalizePriceToEur } from '../../helpers/currency.helper.js';
 import { scrapeKpLatest } from '../../features/kpPages/kpPages.scraper.js';
 import { scrapePaLatestCars, scrapePaLatestMotos, scrapePaMotoPartsAndEquipmentBeta, } from '../../features/paPages/paPages.scraper.js';
 import { scrapeFacebookGroupsLatest, scrapeFacebookMarketplaceLatest, } from '../../features/facebookPages/facebookSources.scraper.js';
 function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
+}
+// PA je jedini izvor iza Cloudflare-a (headed Chromium prolazi izazov, ali svaki
+// prolaz je "skup" u smislu bot-fingerprint-a). Da ne bismo gadjali PA na svaki
+// ingest ciklus (podrazumevano 5 min = 864 zahteva/dan), PA se skrejpuje ređe,
+// nezavisno od KP intervala. In-memory timestamp je dovoljan — worker je jedan
+// dugotrajan proces, restart samo resetuje tajmer (bezopasno, samo jedan raniji
+// PA prolaz taj ciklus).
+let lastPaRunAt = 0;
+function shouldRunPaThisCycle() {
+    const intervalMs = Number(process.env.PA_SCRAPE_INTERVAL_MINUTES ?? 15) * 60_000;
+    if (Date.now() - lastPaRunAt < intervalMs)
+        return false;
+    lastPaRunAt = Date.now();
+    return true;
+}
+function jitter(minMs, maxMs) {
+    return sleep(Math.floor(minMs + Math.random() * (maxMs - minMs)));
 }
 function safeTake(x) {
     const n = Number(x ?? 20);
@@ -17,52 +37,76 @@ function extractListingData(listing, source) {
     let price = null;
     let locationText = null;
     if (source === 'kp') {
-        price = typeof listing.priceNumber === 'number' ? listing.priceNumber : null;
+        price = normalizePriceToEur({
+            amount: listing.priceNumber,
+            hints: [listing.currencyAcronym, listing.currency, listing.priceText],
+        });
         locationText = listing.location || null;
     }
     else if (source.startsWith('pa-')) {
-        // Za PA, priceEur je string, pretvorite u number
-        const priceStr = listing.priceEur || '';
-        const priceMatch = priceStr.match(/(\d+(?:\.\d+)?)/);
-        price = priceMatch ? parseFloat(priceMatch[1]) : null;
+        price = normalizePriceToEur({
+            amount: listing.priceEur,
+            explicitCurrency: 'EUR',
+            hints: [listing.priceEur],
+        });
         locationText = listing.city || null;
     }
     else if (source.startsWith('fb-')) {
-        price = typeof listing.price === 'number' ? listing.price : null;
+        price = normalizePriceToEur({
+            amount: listing.price,
+            hints: [
+                typeof listing.price === 'string' ? listing.price : null,
+                listing.title,
+                typeof listing.raw?.price === 'string' ? listing.raw.price : null,
+            ],
+        });
         locationText = listing.locationText || null;
     }
     return { price, locationText };
 }
 async function upsertListingsBySource(source, listings) {
-    let upserted = 0;
-    for (const it of listings) {
-        const externalId = String(it.id);
-        if (!externalId || !it.title || !it.url)
+    if (listings.length === 0)
+        return 0;
+    // Keep only valid listings and de-duplicate by externalId to avoid redundant DB work.
+    const deduped = new Map();
+    for (const item of listings) {
+        const externalId = String(item?.id ?? '');
+        if (!externalId || !item?.title || !item?.url)
             continue;
-        const { price, locationText } = extractListingData(it, source);
-        await prisma.listing.upsert({
-            where: { source_externalId: { source, externalId } },
-            update: {
-                title: it.title,
-                url: it.url,
-                price,
-                locationText,
-                raw: it,
-            },
-            create: {
-                source,
-                externalId,
-                title: it.title,
-                url: it.url,
-                price,
-                locationText,
-                raw: it,
-                createdAt: new Date(),
-            },
-        });
-        upserted++;
+        deduped.set(externalId, item);
     }
-    return upserted;
+    const rows = Array.from(deduped.entries()).map(([externalId, item]) => {
+        const { price, locationText } = extractListingData(item, source);
+        return {
+            id: randomUUID(),
+            source,
+            externalId,
+            title: String(item.title),
+            url: String(item.url),
+            price,
+            locationText,
+            rawJson: JSON.stringify(item ?? {}),
+        };
+    });
+    if (rows.length === 0)
+        return 0;
+    const chunkSize = 250;
+    for (let i = 0; i < rows.length; i += chunkSize) {
+        const chunk = rows.slice(i, i + chunkSize);
+        const values = chunk.map((row) => Prisma.sql `(${row.id}, ${row.source}, ${row.externalId}, ${row.title}, ${row.price}, ${row.locationText}, ${row.url}, ${row.rawJson}::jsonb)`);
+        await prisma.$executeRaw(Prisma.sql `
+        INSERT INTO "Listing" ("id", "source", "externalId", "title", "price", "locationText", "url", "raw")
+        VALUES ${Prisma.join(values)}
+        ON CONFLICT ("source", "externalId")
+        DO UPDATE SET
+          "title" = EXCLUDED."title",
+          "price" = EXCLUDED."price",
+          "locationText" = EXCLUDED."locationText",
+          "url" = EXCLUDED."url",
+          "raw" = EXCLUDED."raw"
+      `);
+    }
+    return rows.length;
 }
 export const ingestWorker = new Worker('ingest', async (job) => {
     if (job.name !== 'ingest_latest')
@@ -93,23 +137,30 @@ export const ingestWorker = new Worker('ingest', async (job) => {
     catch (error) {
         console.error('[ingest] KP scrape failed', error);
     }
-    try {
-        paCars = await scrapePaLatestCars({ take });
+    if (shouldRunPaThisCycle()) {
+        try {
+            paCars = await scrapePaLatestCars({ take });
+        }
+        catch (error) {
+            console.error('[ingest] PA cars scrape failed', error);
+        }
+        await jitter(2_000, 8_000);
+        try {
+            paMotos = await scrapePaLatestMotos({ take });
+        }
+        catch (error) {
+            console.error('[ingest] PA motos scrape failed', error);
+        }
+        await jitter(2_000, 8_000);
+        try {
+            paMotoPartsBeta = await scrapePaMotoPartsAndEquipmentBeta({ take });
+        }
+        catch (error) {
+            console.error('[ingest] PA moto parts beta scrape failed', error);
+        }
     }
-    catch (error) {
-        console.error('[ingest] PA cars scrape failed', error);
-    }
-    try {
-        paMotos = await scrapePaLatestMotos({ take });
-    }
-    catch (error) {
-        console.error('[ingest] PA motos scrape failed', error);
-    }
-    try {
-        paMotoPartsBeta = await scrapePaMotoPartsAndEquipmentBeta({ take });
-    }
-    catch (error) {
-        console.error('[ingest] PA moto parts beta scrape failed', error);
+    else {
+        console.log('[ingest] skipping PA this cycle (PA_SCRAPE_INTERVAL_MINUTES not elapsed)');
     }
     try {
         fbGroups = await scrapeFacebookGroupsLatest({ take });
@@ -132,8 +183,11 @@ export const ingestWorker = new Worker('ingest', async (job) => {
         fbMarketplace: fbMarketplace.listings.length,
     });
     // ---- 2) UPSERT (NO DUPES) ----
-    const before = await prisma.listing.count();
-    console.log('[ingest] db before count', before);
+    const enableIngestCountLogs = process.env.INGEST_COUNT_LOGS === '1';
+    if (enableIngestCountLogs) {
+        const before = await prisma.listing.count();
+        console.log('[ingest] db before count', before);
+    }
     console.time('[ingest] upsert_total');
     try {
         let upserted = 0;
@@ -171,7 +225,9 @@ export const ingestWorker = new Worker('ingest', async (job) => {
     finally {
         console.timeEnd('[ingest] upsert_total');
     }
-    const after = await prisma.listing.count();
-    console.log('[ingest] db after count', after);
+    if (enableIngestCountLogs) {
+        const after = await prisma.listing.count();
+        console.log('[ingest] db after count', after);
+    }
 }, { connection: redisConnection });
 //# sourceMappingURL=ingest.worker.js.map

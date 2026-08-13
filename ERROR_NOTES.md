@@ -1,3 +1,16 @@
+## 2026-07-11 - RESOLVED (verified)
+
+Sent a real push directly via `sendExpoPushNotification` to the registered physical
+device's Expo token (`ExponentPushToken[EIwuOWEdAAiW6tG1swIPXk]`, device
+`cmo9whlyg00031ov0qmmzsdno`). Expo accepted it with no ticket error (no
+`InvalidCredentials`), and the user confirmed the notification actually arrived on the
+phone. FCM V1 credentials on the Expo/EAS project are valid and push delivery works
+end-to-end. Whatever caused the March error (likely a since-corrected FCM service
+account or `google-services.json` mismatch) is no longer present. Closing this out —
+see `docs/TODO.md` for the up-to-date blocker list.
+
+---
+
 ## 2026-03-31 - Expo push / FCM problem
 
 ### Simptom

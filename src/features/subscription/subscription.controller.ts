@@ -19,8 +19,7 @@ const ACTIVE_EVENTS = new Set([
 ]);
 
 // RevenueCat event types that indicate the subscription is no longer active
-const DEACTIVATION_EVENTS = new Set([
-  "CANCELLATION",
+const EXPIRATION_EVENTS = new Set([
   "EXPIRATION",
   "BILLING_ISSUE",
 ]);
@@ -125,9 +124,36 @@ export async function handleRevenueCatWebhook(req: Request, res: Response) {
     return res.status(200).json({ ok: true });
   }
 
-  if (DEACTIVATION_EVENTS.has(event.type)) {
-    const newStatus: SubscriptionStatus =
-      event.type === "CANCELLATION" ? "CANCELLED" : "EXPIRED";
+  if (event.type === "CANCELLATION") {
+    await prisma.subscription.upsert({
+      where: { userId: user.id },
+      update: {
+        status: "CANCELLED",
+        renewsAt,
+        pausedAt: null,
+        cancelledAt: new Date(),
+        updatedAt: new Date(),
+      },
+      create: {
+        userId: user.id,
+        tier: newTier,
+        status: "CANCELLED",
+        revenuecatId: appUserId,
+        productId,
+        renewsAt,
+        pausedAt: null,
+        cancelledAt: new Date(),
+        updatedAt: new Date(),
+      },
+    });
+
+    // Cancellation only marks auto-renew disabled; entitlement stays unchanged until EXPIRATION.
+    console.log(`[subscription] Cancelled renewal for user ${user.id}`);
+    return res.status(200).json({ ok: true });
+  }
+
+  if (EXPIRATION_EVENTS.has(event.type)) {
+    const newStatus: SubscriptionStatus = "EXPIRED";
 
     await prisma.$transaction([
       prisma.subscription.upsert({
@@ -148,7 +174,7 @@ export async function handleRevenueCatWebhook(req: Request, res: Response) {
           updatedAt: new Date(),
         },
       }),
-      // Downgrade to FREE when subscription lapses
+      // Downgrade to FREE only when subscription actually expires.
       prisma.user.update({
         where: { id: user.id },
         data: { planTier: "FREE" },

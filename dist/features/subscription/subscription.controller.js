@@ -14,8 +14,7 @@ const ACTIVE_EVENTS = new Set([
     "SUBSCRIPTION_EXTENDED",
 ]);
 // RevenueCat event types that indicate the subscription is no longer active
-const DEACTIVATION_EVENTS = new Set([
-    "CANCELLATION",
+const EXPIRATION_EVENTS = new Set([
     "EXPIRATION",
     "BILLING_ISSUE",
 ]);
@@ -83,8 +82,34 @@ export async function handleRevenueCatWebhook(req, res) {
         console.log(`[subscription] Activated ${newTier} for user ${user.id}, renews: ${renewsAt?.toISOString()}`);
         return res.status(200).json({ ok: true });
     }
-    if (DEACTIVATION_EVENTS.has(event.type)) {
-        const newStatus = event.type === "CANCELLATION" ? "CANCELLED" : "EXPIRED";
+    if (event.type === "CANCELLATION") {
+        await prisma.subscription.upsert({
+            where: { userId: user.id },
+            update: {
+                status: "CANCELLED",
+                renewsAt,
+                pausedAt: null,
+                cancelledAt: new Date(),
+                updatedAt: new Date(),
+            },
+            create: {
+                userId: user.id,
+                tier: newTier,
+                status: "CANCELLED",
+                revenuecatId: appUserId,
+                productId,
+                renewsAt,
+                pausedAt: null,
+                cancelledAt: new Date(),
+                updatedAt: new Date(),
+            },
+        });
+        // Cancellation only marks auto-renew disabled; entitlement stays unchanged until EXPIRATION.
+        console.log(`[subscription] Cancelled renewal for user ${user.id}`);
+        return res.status(200).json({ ok: true });
+    }
+    if (EXPIRATION_EVENTS.has(event.type)) {
+        const newStatus = "EXPIRED";
         await prisma.$transaction([
             prisma.subscription.upsert({
                 where: { userId: user.id },
@@ -104,7 +129,7 @@ export async function handleRevenueCatWebhook(req, res) {
                     updatedAt: new Date(),
                 },
             }),
-            // Downgrade to FREE when subscription lapses
+            // Downgrade to FREE only when subscription actually expires.
             prisma.user.update({
                 where: { id: user.id },
                 data: { planTier: "FREE" },

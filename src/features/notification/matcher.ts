@@ -201,8 +201,15 @@ function buildListingText(listing: ListingRow): string {
   ].join(" "));
 }
 
+function getListingPriceEur(listing: ListingRow): number | null {
+  // listing.price is already normalized to EUR at ingest time (ingest.worker.ts) -
+  // re-running normalizePriceToEur here would detect the original RSD hints and
+  // convert it a second time.
+  return listing.price;
+}
+
 function isAutoPartText(text: string): boolean {
-  return /(auto[-\s]?delov|diferencijal|menjac|amortizer|turbina|alternator|anlaser|kocnic|kvacil|far|stop|branik|retrovizor|trap|lezaj|poluosovin|hladnjak)/.test(text);
+  return /(auto[-\s]?delov|auto[-\s]?oprema|diferencijal|menjac|amortizer|turbina|alternator|anlaser|kocnic|kvacil|far|stop|branik|retrovizor|trap|lezaj|poluosovin|hladnjak|patosnic|presvlak|tapacirung|kadica)/.test(text);
 }
 
 function isAutoVehicleText(text: string): boolean {
@@ -361,8 +368,10 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
     if (alert.kmTo !== null && km > alert.kmTo) return false;
   }
 
+  const listingPriceEur = getListingPriceEur(listing);
+
   // For "SVE" category, matching intentionally relies only on keywords.
-  if (normalizedCategory !== "SVE" && alert.priceMax && listing.price != null && listing.price > alert.priceMax) {
+  if (normalizedCategory !== "SVE" && alert.priceMax && listingPriceEur != null && listingPriceEur > alert.priceMax) {
     return false;
   }
 
@@ -392,11 +401,16 @@ function extractListingImageUrl(listing: ListingRow): string | null {
   return null;
 }
 
-export async function matchAndNotify(listings: ListingRow[]): Promise<void> {
+export async function matchAndNotify(
+  listings: ListingRow[],
+  options?: { alertIds?: string[] },
+): Promise<void> {
   if (listings.length === 0) return;
 
   const alerts = await prisma.alert.findMany({
-    where: { isActive: true },
+    where: options?.alertIds
+      ? { id: { in: options.alertIds }, isActive: true }
+      : { isActive: true },
     select: {
       id: true,
       deviceId: true,
@@ -416,6 +430,37 @@ export async function matchAndNotify(listings: ListingRow[]): Promise<void> {
 
   if (alerts.length === 0) return;
 
+  // OPTIMIZATION: Fetch all sent logs at once (not per-alert)
+  const alertIds = alerts.map((a) => a.id);
+  const listingIds = listings.map((l) => l.id);
+  
+  const sentLogs = await prisma.notificationLog.findMany({
+    where: {
+      alertId: { in: alertIds },
+      listingId: { in: listingIds },
+    },
+    select: { alertId: true, listingId: true },
+  });
+  
+  const sentSet = new Set(
+    sentLogs.map((log) => `${log.alertId}|${log.listingId}`)
+  );
+
+  // OPTIMIZATION: Fetch all pending/failed notifications at once (not per-alert)
+  const pendingNotifications = await prisma.notification.findMany({
+    where: {
+      alertId: { in: alertIds },
+      status: { in: ["PENDING", "FAILED"] },
+    },
+    select: { alertId: true, listingId: true },
+  });
+  
+  const pendingSet = new Set(
+    pendingNotifications
+      .filter((n) => n.listingId)
+      .map((n) => `${n.alertId}|${n.listingId}`)
+  );
+
   const notificationsToCreate: Array<{
     deviceId: string;
     expoPushToken: string;
@@ -432,29 +477,17 @@ export async function matchAndNotify(listings: ListingRow[]): Promise<void> {
     for (const listing of listings) {
       if (!doesMatch(listing, alert)) continue;
 
-      const alreadySent = await prisma.notificationLog.findUnique({
-        where: {
-          alertId_listingId: {
-            alertId: alert.id,
-            listingId: listing.id,
-          },
-        },
-      });
-      if (alreadySent) continue;
+      // OPTIMIZATION: Check in-memory set (not DB)
+      const key = `${alert.id}|${listing.id}`;
+      if (sentSet.has(key)) continue;
 
-      const existingPendingOrFailed = await prisma.notification.findFirst({
-        where: {
-          alertId: alert.id,
-          listingId: listing.id,
-          status: { in: ["PENDING", "FAILED"] },
-        },
-        select: { id: true },
-      });
+      // OPTIMIZATION: Check in-memory set (not DB)
+      if (pendingSet.has(key)) continue;
 
-      if (existingPendingOrFailed) continue;
+      const listingPriceEur = getListingPriceEur(listing);
 
-      const priceText = listing.price
-        ? `${listing.price.toLocaleString("sr-RS")} EUR`
+      const priceText = listingPriceEur
+        ? `${listingPriceEur.toLocaleString("sr-RS")} EUR`
         : "Cena nije navedena";
 
       notificationsToCreate.push({
@@ -598,6 +631,24 @@ export async function matchAndNotify(listings: ListingRow[]): Promise<void> {
   }
 
   console.log(`[matcher] Processed ${notificationsToCreate.length} notifications`);
+}
+
+export async function backfillMatchForAlert(alertId: string): Promise<void> {
+  const listings = await prisma.listing.findMany({
+    select: {
+      id: true,
+      source: true,
+      title: true,
+      price: true,
+      locationText: true,
+      url: true,
+      raw: true,
+    },
+  });
+
+  if (listings.length === 0) return;
+
+  await matchAndNotify(listings as ListingRow[], { alertIds: [alertId] });
 }
 
 export async function retryFailedNotifications(limit = 50): Promise<void> {
