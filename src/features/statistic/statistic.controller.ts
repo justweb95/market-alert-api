@@ -32,6 +32,14 @@ type StatisticsResponse = {
     paidUsers: number;
     conversionRate: number;
   };
+  recentScrapeRuns: Array<{
+    id: string;
+    source: string;
+    success: boolean;
+    itemCount: number;
+    errorMessage: string | null;
+    createdAt: Date;
+  }>;
   users: Array<{
     userId: string;
     name: string;
@@ -134,6 +142,7 @@ export async function getStatistic(req: Request, res: Response) {
     activeSubsByTier,
     totalPaidUsers,
     drugarskiCount,
+    recentScrapeRuns,
   ] = await Promise.all([
     prisma.user.count(),
     prisma.device.count(),
@@ -154,6 +163,18 @@ export async function getStatistic(req: Request, res: Response) {
     prisma.subscription.groupBy({ by: ["tier"], _count: { _all: true }, where: { status: "ACTIVE" } }),
     prisma.subscription.count(),
     prisma.user.count({ where: { promoCodeUsed: FREE_BRONZE_CODE } }),
+    prisma.scrapeRun.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 7,
+      select: {
+        id: true,
+        source: true,
+        success: true,
+        itemCount: true,
+        errorMessage: true,
+        createdAt: true,
+      },
+    }),
   ]);
 
   const TIER_PRICE: Record<string, number> = { FREE: 0, BRONZE: 10, SILVER: 15, GOLD: 20 };
@@ -304,6 +325,7 @@ export async function getStatistic(req: Request, res: Response) {
       paidUsers,
       conversionRate,
     },
+    recentScrapeRuns,
     users: usersDetailed,
   };
 

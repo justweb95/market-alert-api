@@ -29,6 +29,25 @@ function shouldRunPaThisCycle() {
 function jitter(minMs, maxMs) {
     return sleep(Math.floor(minMs + Math.random() * (maxMs - minMs)));
 }
+// Beleži rezultat svakog scrape pokušaja (za admin dashboard "poslednji scrapovi" box).
+// Namerno best-effort — ako upis u bazu padne, to ne sme da obori ceo ingest job.
+async function recordScrapeRun(source, success, itemCount, errorMessage) {
+    try {
+        await prisma.scrapeRun.create({
+            data: {
+                source,
+                success,
+                itemCount,
+                errorMessage: success
+                    ? null
+                    : String(errorMessage instanceof Error ? errorMessage.message : errorMessage).slice(0, 500),
+            },
+        });
+    }
+    catch (e) {
+        console.error('[ingest] failed to record scrape run', e);
+    }
+}
 function safeTake(x) {
     const n = Number(x ?? 20);
     return Number.isFinite(n) && n > 0 && n <= 50 ? n : 20;
@@ -133,30 +152,38 @@ export const ingestWorker = new Worker('ingest', async (job) => {
     };
     try {
         kp = await scrapeKpLatest({ page: 1, take });
+        await recordScrapeRun('kp', true, kp.listings.length);
     }
     catch (error) {
         console.error('[ingest] KP scrape failed', error);
+        await recordScrapeRun('kp', false, 0, error);
     }
     if (shouldRunPaThisCycle()) {
         try {
             paCars = await scrapePaLatestCars({ take });
+            await recordScrapeRun('pa-car', true, paCars.listings.length);
         }
         catch (error) {
             console.error('[ingest] PA cars scrape failed', error);
+            await recordScrapeRun('pa-car', false, 0, error);
         }
         await jitter(2_000, 8_000);
         try {
             paMotos = await scrapePaLatestMotos({ take });
+            await recordScrapeRun('pa-moto', true, paMotos.listings.length);
         }
         catch (error) {
             console.error('[ingest] PA motos scrape failed', error);
+            await recordScrapeRun('pa-moto', false, 0, error);
         }
         await jitter(2_000, 8_000);
         try {
             paMotoPartsBeta = await scrapePaMotoPartsAndEquipmentBeta({ take });
+            await recordScrapeRun('pa-moto-parts-beta', true, paMotoPartsBeta.listings.length);
         }
         catch (error) {
             console.error('[ingest] PA moto parts beta scrape failed', error);
+            await recordScrapeRun('pa-moto-parts-beta', false, 0, error);
         }
     }
     else {

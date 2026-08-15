@@ -50,7 +50,7 @@ export async function getStatistic(req, res) {
         res.json(statsCache.payload);
         return;
     }
-    const [totalUsers, totalDevices, totalAlerts, totalListings, totalNotifications, totalNotificationLogs, activeAlerts, listingsBySource, notificationsByStatus, usersByPlanTier, subscriptionsByStatus, latestListing, alertsByCategory, activeSubsByTier, totalPaidUsers, drugarskiCount,] = await Promise.all([
+    const [totalUsers, totalDevices, totalAlerts, totalListings, totalNotifications, totalNotificationLogs, activeAlerts, listingsBySource, notificationsByStatus, usersByPlanTier, subscriptionsByStatus, latestListing, alertsByCategory, activeSubsByTier, totalPaidUsers, drugarskiCount, recentScrapeRuns,] = await Promise.all([
         prisma.user.count(),
         prisma.device.count(),
         prisma.alert.count(),
@@ -70,6 +70,18 @@ export async function getStatistic(req, res) {
         prisma.subscription.groupBy({ by: ["tier"], _count: { _all: true }, where: { status: "ACTIVE" } }),
         prisma.subscription.count(),
         prisma.user.count({ where: { promoCodeUsed: FREE_BRONZE_CODE } }),
+        prisma.scrapeRun.findMany({
+            orderBy: { createdAt: "desc" },
+            take: 7,
+            select: {
+                id: true,
+                source: true,
+                success: true,
+                itemCount: true,
+                errorMessage: true,
+                createdAt: true,
+            },
+        }),
     ]);
     const TIER_PRICE = { FREE: 0, BRONZE: 10, SILVER: 15, GOLD: 20 };
     const revenueByTier = activeSubsByTier.map((r) => ({
@@ -211,6 +223,7 @@ export async function getStatistic(req, res) {
             paidUsers,
             conversionRate,
         },
+        recentScrapeRuns,
         users: usersDetailed,
     };
     statsCache = {

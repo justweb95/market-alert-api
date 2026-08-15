@@ -173,3 +173,14 @@ enum NotificationStatus {
   FAILED
   SEEN
 }
+
+model ScrapeRun {
+  id           String   @id @default(cuid())
+  source       String
+  success      Boolean
+  itemCount    Int      @default(0)
+  errorMessage String?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+}
