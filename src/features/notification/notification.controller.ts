@@ -276,9 +276,14 @@ export async function registerDevice(req: Request, res: Response) {
       .json({ error: "Validni expoPushToken i platform su obavezni" });
   }
 
-  if (hasAnyUserField && (!firstName || !lastName || !email || !password)) {
+  // Login (samo email+password) i registracija (ime+prezime+email+password) dele
+  // ovu rutu. Ime/prezime NISU obavezni ovde — provera ispod (kad se zna da li
+  // nalog vec postoji) trazi ih samo ako se stvarno pravi nov nalog, da login ne bi
+  // morao da ih salje (i da ne bi slucajno prepisao postojece ime/prezime praznim
+  // vrednostima, videti logiku ispod).
+  if (hasAnyUserField && (!email || !password)) {
     return res.status(400).json({
-      error: "Za registraciju naloga potrebni su ime, prezime, email i password",
+      error: "Email i password su obavezni",
     });
   }
 
@@ -290,7 +295,7 @@ export async function registerDevice(req: Request, res: Response) {
     let resolvedUserId: string | null = null;
     let displacedDeviceId: string | null = null;
 
-    if (hasAnyUserField && firstName && lastName && email && password) {
+    if (hasAnyUserField && email && password) {
       const normalizedEmail = normalizeEmail(email);
       const existingUser = await prisma.user.findUnique({
         where: { email: normalizedEmail },
@@ -301,15 +306,26 @@ export async function registerDevice(req: Request, res: Response) {
           return res.status(401).json({ error: "Pogresan email ili password" });
         }
 
-        const updatedUser = await prisma.user.update({
-          where: { id: existingUser.id },
-          data: {
-            firstName,
-            lastName,
-          },
-        });
+        // LOGIN — ime/prezime menjamo samo ako su STVARNO poslati (npr. korisnik ih
+        // je izmenio na "Korisnicki podaci" ekranu). Login ekran salje samo
+        // email+password, pa ovde ne sme da prepise postojece ime/prezime praznim
+        // vrednostima.
+        const updateData: { firstName?: string; lastName?: string } = {};
+        if (firstName) updateData.firstName = firstName;
+        if (lastName) updateData.lastName = lastName;
+
+        const updatedUser = Object.keys(updateData).length > 0
+          ? await prisma.user.update({ where: { id: existingUser.id }, data: updateData })
+          : existingUser;
         resolvedUserId = updatedUser.id;
       } else {
+        // REGISTRACIJA — nov nalog stvarno zahteva ime i prezime.
+        if (!firstName || !lastName) {
+          return res.status(400).json({
+            error: "Nalog sa ovim emailom ne postoji. Za registraciju su potrebni ime i prezime.",
+          });
+        }
+
         const emailVerifyToken = randomBytes(32).toString("hex");
         const createdUser = await prisma.user.create({
           data: {
