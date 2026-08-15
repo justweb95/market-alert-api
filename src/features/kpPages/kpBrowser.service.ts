@@ -10,6 +10,15 @@ const ARTICLE_WAIT_MS = 15_000;
 // oglasima). Isti obrazac kao PA Cloudflare blokada — resenje je isto: pravi headed
 // Chromium (Patchright) umesto axios-a. Posebna browser instanca od PA-a da izbegnemo
 // deljeno stanje/kontenciju izmedju dva izvora koja se skrejpuju u istom ciklusu.
+//
+// 2026-08-15 (drugi nalaz istog dana): i pravi headed Chromium je i dalje vracao
+// KP-ov "Uskoro cemo ponovo biti dostupni" ekran sa produkcione IP adrese — ovo NIJE
+// JS/fingerprint izazov (koji Patchright resava za PA), vec IP-nivo blokada samog
+// Lightsail servera. Potvrdjeno: identican kod sa korisnikove lokalne IP radi
+// besprekorno. Zato postoji KP_PROXY_SERVER — kad je podesen, sav KP saobracaj ide
+// kroz taj proxy umesto direktno sa server IP-a. Namerno env var (ne hardkodovano)
+// jer je trenutni proxy besplatan/javan servis bez SLA — moze prestati da radi bilo
+// kad, treba moci da se zameni/ugasi bez novog deploy-a.
 let browserPromise: Promise<Browser> | null = null;
 let contextPromise: Promise<BrowserContext> | null = null;
 
@@ -17,7 +26,11 @@ async function getContext(): Promise<BrowserContext> {
   if (!contextPromise) {
     contextPromise = (async () => {
       if (!browserPromise) {
-        browserPromise = chromium.launch({ headless: false });
+        const proxyServer = process.env.KP_PROXY_SERVER;
+        browserPromise = chromium.launch({
+          headless: false,
+          ...(proxyServer ? { proxy: { server: proxyServer } } : {}),
+        });
       }
       const browser = await browserPromise;
       return browser.newContext();
