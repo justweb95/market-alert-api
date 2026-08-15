@@ -33,6 +33,7 @@ model User {
   lastName                  String
   email                     String    @unique
   passwordHash              String
+  googleId                  String?   @unique
   planTier                  PlanTier  @default(FREE)
   promoCodeUsed             String?
   promoRedeemedAt           DateTime?

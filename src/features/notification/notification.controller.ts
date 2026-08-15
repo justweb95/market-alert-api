@@ -5,6 +5,7 @@ import { sendExpoPushNotification } from "./expoPush.service.js";
 import { backfillMatchForAlert } from "./matcher.js";
 import { FREE_BRONZE_CODE } from "../../lib/constants.js";
 import { sendVerificationEmail } from "../../lib/email.service.js";
+import { verifyGoogleIdToken } from "../../lib/googleAuth.js";
 
 type PlanTier = "FREE" | "BRONZE" | "SILVER" | "GOLD";
 type SubscriptionStatus = "TRIAL" | "ACTIVE" | "PAUSED" | "EXPIRED" | "CANCELLED";
@@ -268,7 +269,8 @@ export async function registerDevice(req: Request, res: Response) {
   const lastName = getSingleString(req.body?.lastName);
   const email = getSingleString(req.body?.email);
   const password = getSingleString(req.body?.password);
-  const hasAnyUserField = !!(firstName || lastName || email || password);
+  const googleIdToken = getSingleString(req.body?.googleIdToken);
+  const hasAnyUserField = !!(firstName || lastName || email || password || googleIdToken);
 
   if (!expoPushToken || !normalizedPlatform) {
     return res
@@ -276,12 +278,13 @@ export async function registerDevice(req: Request, res: Response) {
       .json({ error: "Validni expoPushToken i platform su obavezni" });
   }
 
-  // Login (samo email+password) i registracija (ime+prezime+email+password) dele
-  // ovu rutu. Ime/prezime NISU obavezni ovde — provera ispod (kad se zna da li
-  // nalog vec postoji) trazi ih samo ako se stvarno pravi nov nalog, da login ne bi
-  // morao da ih salje (i da ne bi slucajno prepisao postojece ime/prezime praznim
-  // vrednostima, videti logiku ispod).
-  if (hasAnyUserField && (!email || !password)) {
+  // Tri nacina da se ova ruta pozove sa nalog-podacima: login (email+password),
+  // registracija (ime+prezime+email+password), ili Google (googleIdToken sam).
+  // Ime/prezime NISU obavezni ovde — provera ispod (kad se zna da li nalog vec
+  // postoji) trazi ih samo ako se stvarno pravi nov nalog preko email/password puta,
+  // da login ne bi morao da ih salje (i da ne bi slucajno prepisao postojece ime/
+  // prezime praznim vrednostima, videti logiku ispod).
+  if (hasAnyUserField && !googleIdToken && (!email || !password)) {
     return res.status(400).json({
       error: "Email i password su obavezni",
     });
@@ -295,7 +298,45 @@ export async function registerDevice(req: Request, res: Response) {
     let resolvedUserId: string | null = null;
     let displacedDeviceId: string | null = null;
 
-    if (hasAnyUserField && email && password) {
+    if (googleIdToken) {
+      let identity;
+      try {
+        identity = await verifyGoogleIdToken(googleIdToken);
+      } catch (error) {
+        console.error("[notification] Google token verification failed:", error);
+        return res.status(401).json({ error: "Google prijava nije uspela. Pokusaj ponovo." });
+      }
+
+      const normalizedEmail = normalizeEmail(identity.email);
+      const existingUser = await prisma.user.findFirst({
+        where: { OR: [{ googleId: identity.googleId }, { email: normalizedEmail }] },
+      });
+
+      if (existingUser) {
+        const updatedUser = existingUser.googleId
+          ? existingUser
+          : await prisma.user.update({
+              where: { id: existingUser.id },
+              data: { googleId: identity.googleId },
+            });
+        resolvedUserId = updatedUser.id;
+      } else {
+        const createdUser = await prisma.user.create({
+          data: {
+            firstName: identity.firstName || "Korisnik",
+            lastName: identity.lastName || "",
+            email: normalizedEmail,
+            // Google korisnik nema lozinku — generise se nasumican, nikad korisniku
+            // prikazan hash da polje ostane ne-null bez migracije passwordHash-a u
+            // nullable. Nikad se ne koristi za login (googleId ima prioritet iznad).
+            passwordHash: hashPassword(randomBytes(32).toString("hex")),
+            googleId: identity.googleId,
+            emailVerified: identity.emailVerified,
+          },
+        });
+        resolvedUserId = createdUser.id;
+      }
+    } else if (hasAnyUserField && email && password) {
       const normalizedEmail = normalizeEmail(email);
       const existingUser = await prisma.user.findUnique({
         where: { email: normalizedEmail },

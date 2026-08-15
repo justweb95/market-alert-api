@@ -28,6 +28,7 @@
     "expo-server-sdk": "^6.0.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.1",
+    "google-auth-library": "^11.0.2",
     "ioredis": "^5.9.3",
     "nodemailer": "^6.9.16",
     "patchright": "^1.61.1",

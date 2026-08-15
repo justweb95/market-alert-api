@@ -23,6 +23,7 @@ export const registerDeviceSchema = z.object({
   lastName: z.string().min(1, 'Prezime je obavezno').max(100).optional(),
   email: z.string().email('Email adresa nije validna').max(255).optional(),
   password: z.string().min(6, 'Password mora imati najmanje 6 karaktera').max(200).optional(),
+  googleIdToken: z.string().min(1).max(4096).optional(),
 });
 
 // Alert Creation
