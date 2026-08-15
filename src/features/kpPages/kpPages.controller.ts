@@ -1,10 +1,6 @@
 import axios from 'axios';
 import type { Request, Response } from 'express';
-import * as cheerio from 'cheerio';
-import { 
-  getAdIdFromUrl, 
-  stripHtmlTags, 
-  toPostedAt } from '../../helpers/kpPages.helper.js';
+import { scrapeKpLatest } from './kpPages.scraper.js';
 
 const STEALTH_HEADERS: Record<string, string> = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -14,32 +10,7 @@ const STEALTH_HEADERS: Record<string, string> = {
   'DNT': '1',
   'Connection': 'keep-alive',
   'Upgrade-Insecure-Requests': '1',
-}
-
-export interface KpListing {
-  id: number;              
-  title: string;
-  url: string;
-
-  desc: string;
-
-  location: string;
-
-  categoryId: number;
-  categoryName: string;
-  groupId: number;
-  groupName: string;
-
-  priceNumber: number | null;   
-  priceText: string;           
-  currency: string;            
-  currencyAcronym: string;     
-
-  postedRaw: string;            
-  postedAt: string;             
-  validUntil?: string;         
-}
-
+};
 
 export async function scrapeLatestKpListings(req: Request, res: Response): Promise<void> {
   const { page: pageParam = '1', limit: limitParam = '20' } = req.query;
@@ -54,108 +25,16 @@ export async function scrapeLatestKpListings(req: Request, res: Response): Promi
   }
 
   try {
-    const targetUrl = `${process.env.KP_LATEST_URL ?? 'https://www.kupujemprodajem.com/najnoviji/'}${page}`;
-
-    const { data: html } = await axios.get(targetUrl, {
-      headers: STEALTH_HEADERS,
-      timeout: 30000,
-    });
-
-    const $ = cheerio.load(html);
-    const nextDataStr = $('#__NEXT_DATA__').first().text().trim();
-
-    if (!nextDataStr) {
-      res.status(500).json({ success: false, error: 'Missing __NEXT_DATA__ on latest page' });
-      return;
-    }
-
-    const nextData = JSON.parse(nextDataStr);
-
-    // 1) pokušaj da nađeš newest ids
-    const newestIds: string[] =
-      nextData?.props?.pageProps?.initialReduxState?.search?.newestAdsIds ??
-      nextData?.props?.initialReduxState?.search?.newestAdsIds ??
-      nextData?.props?.pageProps?.initialReduxState?.searchResult?.adsIds ??
-      [];
-
-    // 2) pokušaj da nađeš byId mapu
-    const byId =
-      nextData?.props?.pageProps?.initialReduxState?.search?.byId ??
-      nextData?.props?.initialReduxState?.search?.byId ??
-      nextData?.props?.pageProps?.initialReduxState?.searchResult?.byId ??
-      nextData?.props?.pageProps?.initialReduxState?.ad?.byId ??
-      {};
-
-    // Fallback: ako nema newestIds, uzmi ključeve byId
-    const ids = (Array.isArray(newestIds) && newestIds.length > 0)
-      ? newestIds
-      : Object.keys(byId);
-
-    const listings = ids.slice(0, take).map((idStr) => {
-      const item = byId[idStr];
-      const urlPath = String(item?.adUrl ?? '');
-      const absoluteUrl = urlPath.startsWith('http')
-        ? urlPath
-        : `https://www.kupujemprodajem.com${urlPath.startsWith('/') ? '' : '/'}${urlPath}`;
-
-      return {
-        id: Number(item?.id ?? idStr),
-        title: String(item?.name ?? ''),
-        url: absoluteUrl,
-        desc: String(item?.descriptionSnippetDecoded ?? item?.description ?? ''),
-        location: String(item?.location ?? ''),
-        categoryId: Number(item?.categoryId ?? 0),
-        categoryName: String(item?.categoryName ?? ''),
-        groupId: Number(item?.groupId ?? 0),
-        groupName: String(item?.groupName ?? ''),
-        priceNumber: typeof item?.priceNumber === 'number' ? item.priceNumber : null,
-        priceText: String(item?.priceText ?? ''),
-        currency: String(item?.currency ?? ''),
-        currencyAcronym: String(item?.currencyAcronym ?? ''),
-        postedRaw: String(item?.postedRaw ?? ''),
-        postedAt: toPostedAt(String(item?.postedRaw ?? '')),
-        validUntil: String(item?.adValidUntil ?? ''),
-        image: String(item?.image ?? item?.smallImage ?? ''),
-      } as KpListing;
-    });
-
-    res.json({
-      success: true,
-      page,
-      take,
-      count: listings.length,
-      listings,
-    });
-  } catch (error: any) {
-    console.error('Error scraping KP:', error.message);
+    const { listings } = await scrapeKpLatest({ page, take });
+    res.json({ success: true, page, take, count: listings.length, listings });
+  } catch (error: unknown) {
+    console.error('Error scraping KP:', error);
     res.status(500).json({ success: false, error: 'Failed to scrape KP listings' });
   }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Debug helper - vraca raw HTML jednog oglasa (ne prolazi kroz Patchright, taj deo
+// sajta jos nije proveravan da li ima istu ne-browser detekciju kao listing stranice).
 export async function scrapeOglasHtml(req: Request, res: Response): Promise<void> {
   const url = String(req.query.url ?? '').trim();
   if (!url) {
@@ -169,11 +48,10 @@ export async function scrapeOglasHtml(req: Request, res: Response): Promise<void
       timeout: 20000,
     });
 
-    // Vrati kao TEXT da Postman prikaže ceo HTML
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.status(200).send(html);
-  } catch (error: any) {
-    console.error('Error fetching KP oglas html:', error?.message ?? error);
+  } catch (error: unknown) {
+    console.error('Error fetching KP oglas html:', error);
     res.status(500).json({ error: 'Failed to fetch oglas html' });
   }
 }

@@ -1,6 +1,6 @@
-import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { toPostedAt } from '../../helpers/kpPages.helper.js';
+import { detectCurrencyFromText, parseAmount } from '../../helpers/currency.helper.js';
+import { fetchKpHtml } from './kpBrowser.service.js';
 
 export interface KpListing {
   id: number;
@@ -26,16 +26,17 @@ export interface KpListing {
   image?: string;
 }
 
-const STEALTH_HEADERS: Record<string, string> = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Accept-Language': 'sr-RS,sr;q=0.9,en;q=0.8',
-  'Accept-Encoding': 'gzip, deflate, br',
-  DNT: '1',
-  Connection: 'keep-alive',
-  'Upgrade-Insecure-Requests': '1',
-};
+// 2026-08-15: KP je promenio frontend (App-Router-stil kartice, CSS-module hash
+// klase) — stari parser je citao __NEXT_DATA__.props.pageProps.initialReduxState,
+// sto sad dolazi prazno za ne-browser zahteve (videti kpBrowser.service.ts).
+// Novi parser cita oglase direktno iz DOM-a preko klasa koje sadrze ove fragmente
+// (hash prefiks/sufiks se menja po build-u, sadrzaj klase ne).
+const ARTICLE_SELECTOR = 'article[class*="adHolder"]';
+
+function pickText($el: cheerio.Cheerio<any>, $: cheerio.CheerioAPI, classSubstr: string): string {
+  const match = $el.find(`[class*="${classSubstr}"]`).first();
+  return match.length ? match.text().trim() : '';
+}
 
 export async function scrapeKpLatest(opts?: { page?: number; take?: number }) {
   const page = opts?.page ?? 1;
@@ -43,59 +44,53 @@ export async function scrapeKpLatest(opts?: { page?: number; take?: number }) {
 
   const targetUrl = `${process.env.KP_LATEST_URL ?? 'https://www.kupujemprodajem.com/najnoviji/'}${page}`;
 
-  const { data: html } = await axios.get(targetUrl, {
-    headers: STEALTH_HEADERS,
-    timeout: 30_000,
-  });
-
+  const html = await fetchKpHtml(targetUrl);
   const $ = cheerio.load(html);
-  const nextDataStr = $('#__NEXT_DATA__').first().text().trim();
-  if (!nextDataStr) return { page, take, listings: [] as KpListing[] };
 
-  const nextData = JSON.parse(nextDataStr);
+  const cards = $(ARTICLE_SELECTOR).toArray().slice(0, take);
 
-  const newestIds: string[] =
-    nextData?.props?.pageProps?.initialReduxState?.search?.newestAdsIds ??
-    nextData?.props?.initialReduxState?.search?.newestAdsIds ??
-    nextData?.props?.pageProps?.initialReduxState?.searchResult?.adsIds ??
-    [];
+  const listings: KpListing[] = cards.map((card) => {
+    const $card = $(card);
+    const href = $card.find('a[href*="/oglas/"]').first().attr('href') ?? '';
+    const idMatch = href.match(/\/oglas\/(\d+)/);
+    const id = idMatch ? Number(idMatch[1]) : 0;
+    const absoluteUrl = href.startsWith('http')
+      ? href
+      : `https://www.kupujemprodajem.com${href.startsWith('/') ? '' : '/'}${href}`;
 
-  const byId =
-    nextData?.props?.pageProps?.initialReduxState?.search?.byId ??
-    nextData?.props?.initialReduxState?.search?.byId ??
-    nextData?.props?.pageProps?.initialReduxState?.searchResult?.byId ??
-    nextData?.props?.pageProps?.initialReduxState?.ad?.byId ??
-    {};
+    const img = $card.find('img').first();
+    const title =
+      pickText($card, $, '__name') ||
+      img.attr('alt') ||
+      $card.find('a[href*="/oglas/"]').first().attr('aria-label') ||
+      '';
 
-  const ids = Array.isArray(newestIds) && newestIds.length > 0 ? newestIds : Object.keys(byId);
+    const priceText = pickText($card, $, 'adPrice') || pickText($card, $, '__price');
+    const priceNumber = parseAmount(priceText);
+    const currency = detectCurrencyFromText(priceText) ?? '';
 
-  const listings = ids.slice(0, take).map((idStr) => {
-    const item = byId[idStr];
-    const urlPath = String(item?.adUrl ?? '');
-    const absoluteUrl = urlPath.startsWith('http')
-      ? urlPath
-      : `https://www.kupujemprodajem.com${urlPath.startsWith('/') ? '' : '/'}${urlPath}`;
+    const location = pickText($card, $, 'originAndPromoLocation') || pickText($card, $, 'Location');
+    const image = img.attr('src') || img.attr('data-src') || '';
 
     return {
-      id: Number(item?.id ?? idStr),
-      title: String(item?.name ?? ''),
+      id,
+      title,
       url: absoluteUrl,
-      desc: String(item?.descriptionSnippetDecoded ?? item?.description ?? ''),
-      location: String(item?.location ?? ''),
-      categoryId: Number(item?.categoryId ?? 0),
-      categoryName: String(item?.categoryName ?? ''),
-      groupId: Number(item?.groupId ?? 0),
-      groupName: String(item?.groupName ?? ''),
-      priceNumber: typeof item?.priceNumber === 'number' ? item.priceNumber : null,
-      priceText: String(item?.priceText ?? ''),
-      currency: String(item?.currency ?? ''),
-      currencyAcronym: String(item?.currencyAcronym ?? ''),
-      postedRaw: String(item?.postedRaw ?? ''),
-      postedAt: toPostedAt(String(item?.postedRaw ?? '')),
-      validUntil: String(item?.adValidUntil ?? ''),
-      image: String(item?.image ?? item?.smallImage ?? ''),
+      desc: '',
+      location,
+      categoryId: 0,
+      categoryName: '',
+      groupId: 0,
+      groupName: '',
+      priceNumber,
+      priceText,
+      currency,
+      currencyAcronym: currency,
+      postedRaw: '',
+      postedAt: '',
+      image,
     } satisfies KpListing;
   });
 
-  return { page, take, listings };
+  return { page, take, listings: listings.filter((l) => l.id && l.title && l.url) };
 }

@@ -1,0 +1,61 @@
+import { chromium } from 'patchright';
+const NAV_TIMEOUT_MS = 30_000;
+const ARTICLE_WAIT_MS = 15_000;
+// KupujemProdajem prestao je da vraca stvarne oglase plain axios/cheerio zahtevima
+// (2026-08-15: __NEXT_DATA__ i dalje postoji, ali props.pageProps je prazan objekat
+// — server prepoznaje ne-browser klijenta i vraca "prazan" SSR shell umesto pravog
+// sadrzaja; potvrdjeno da isti URL sa pravim Chromium-om vraca pun HTML sa
+// oglasima). Isti obrazac kao PA Cloudflare blokada — resenje je isto: pravi headed
+// Chromium (Patchright) umesto axios-a. Posebna browser instanca od PA-a da izbegnemo
+// deljeno stanje/kontenciju izmedju dva izvora koja se skrejpuju u istom ciklusu.
+let browserPromise = null;
+let contextPromise = null;
+async function getContext() {
+    if (!contextPromise) {
+        contextPromise = (async () => {
+            if (!browserPromise) {
+                browserPromise = chromium.launch({ headless: false });
+            }
+            const browser = await browserPromise;
+            return browser.newContext();
+        })();
+    }
+    return contextPromise;
+}
+export function resetKpBrowserContext() {
+    const prev = contextPromise;
+    contextPromise = null;
+    if (prev) {
+        prev.then((ctx) => ctx.close()).catch(() => { });
+    }
+}
+async function fetchKpHtmlInner(targetUrl) {
+    const context = await getContext();
+    const page = await context.newPage();
+    try {
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+        // Oglasi se renderuju server-side ali samo za "pravi" browser zahtev — sacekaj
+        // bar jednu karticu pre citanja sadrzaja.
+        await page.waitForSelector('article[class*="adHolder"]', { timeout: ARTICLE_WAIT_MS }).catch(() => { });
+        return await page.content();
+    }
+    finally {
+        await page.close();
+    }
+}
+export async function fetchKpHtml(targetUrl) {
+    try {
+        const html = await fetchKpHtmlInner(targetUrl);
+        if (!/adHolder/i.test(html)) {
+            // Jedan retry na svezoj stranici — isti obrazac kao PA servis, ume da se desi
+            // da prvi load stigne pre nego sto se sadrzaj hidrira.
+            return await fetchKpHtmlInner(targetUrl);
+        }
+        return html;
+    }
+    catch (err) {
+        resetKpBrowserContext();
+        throw err;
+    }
+}
+//# sourceMappingURL=kpBrowser.service.js.map
