@@ -1,5 +1,6 @@
 import { prisma } from "../../db/prisma.js";
 import { REGION_CITIES, REGION_CODES, type RegionCode } from "./regions.js";
+import { loosenSearchText, normalizeSearchText } from "../../lib/text.js";
 import { sendExpoPushNotification } from "./expoPush.service.js";
 
 const MAX_NOTIFICATION_RETRIES = 3;
@@ -183,11 +184,9 @@ function buildBatchPushBody(
 }
 
 function normalizeForMatch(value: string): string {
-  return value
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim();
+  // Zajednicka normalizacija: cirilica i latinica (sa ili bez dijakritike)
+  // svode se na isti oblik, pa uparivanje radi u svim kombinacijama pisama.
+  return normalizeSearchText(value);
 }
 
 function extractRawObject(listing: ListingRow): Record<string, unknown> {
@@ -463,6 +462,16 @@ function regionMatches(listing: ListingRow, regions: string[]): boolean {
   return regions.includes(region);
 }
 
+function keywordsMatchTitle(title: string, keywords: string[]): boolean {
+  const strictTitle = normalizeForMatch(title);
+  const looseTitle = loosenSearchText(title);
+
+  return keywords.every((keyword) => {
+    if (strictTitle.includes(normalizeForMatch(keyword))) return true;
+    return looseTitle.includes(loosenSearchText(keyword));
+  });
+}
+
 function locationMatches(listing: ListingRow, locationText: string): boolean {
   const target = normalizeForMatch(locationText);
   if (!target) return true;
@@ -490,10 +499,7 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
 
   if (normalizedCategory === "SVE") {
     if (alert.keywords.length === 0) return false;
-    const titleLower = normalizeForMatch(listing.title);
-    return alert.keywords.every((kw) =>
-      titleLower.includes(normalizeForMatch(kw)),
-    );
+    return keywordsMatchTitle(listing.title, alert.keywords);
   }
 
   const listingKinds = getListingKinds(listing);
@@ -566,12 +572,8 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
     return false;
   }
 
-  if (alert.keywords.length > 0) {
-    const titleLower = normalizeForMatch(listing.title);
-    const allMatch = alert.keywords.every((kw) =>
-      titleLower.includes(normalizeForMatch(kw)),
-    );
-    if (!allMatch) return false;
+  if (alert.keywords.length > 0 && !keywordsMatchTitle(listing.title, alert.keywords)) {
+    return false;
   }
 
   return true;
