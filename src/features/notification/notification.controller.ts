@@ -133,6 +133,66 @@ function computeTrialStatus(trialStartedAt: Date | null | undefined) {
   return { trialActive, trialDaysLeft, trialExpiredAt: expiredAt };
 }
 
+type DeviceWithPlan = {
+  id: string;
+  userId: string | null;
+  trialStartedAt?: Date | null;
+  user?: {
+    planTier: PlanTier;
+    promoCodeUsed: string | null;
+    trialStartedAt: Date | null;
+    subscription: SubscriptionLite | null;
+  } | null;
+};
+
+/**
+ * Limiti signala za jedan uredjaj/nalog.
+ *
+ * maxActive = broj signala koji istovremeno smeju da budu ukljuceni (plan).
+ * maxTotal  = maxActive aktivnih + isto toliko sacuvanih "u rezervi" (pauzirani
+ *             signali / nacrti). Pauziran signal NE zauzima aktivno mesto, pa
+ *             korisnik moze da pauzira jedan i odmah napravi/ukljuci drugi, a
+ *             prethodni ostaje sacuvan u bazi.
+ */
+function resolveAlertLimits(device: DeviceWithPlan): {
+  maxActive: number;
+  maxTotal: number;
+} {
+  const user = device.user ?? null;
+  const planTier = (user?.planTier ?? "FREE") as PlanTier;
+  const isDrugarskiActive = user?.promoCodeUsed === FREE_BRONZE_CODE;
+  const trialStart = user?.trialStartedAt ?? device.trialStartedAt ?? null;
+  const { trialActive } = computeTrialStatus(trialStart);
+  const hasActiveSub = hasPaidAccess(user?.subscription ?? null);
+
+  const maxActive = isDrugarskiActive
+    ? 5
+    : hasActiveSub
+      ? getTierAlertLimit(planTier)
+      : trialActive
+        ? getTierAlertLimit("BRONZE")
+        : 0;
+
+  return { maxActive, maxTotal: maxActive * 2 };
+}
+
+/** Where filter koji hvata sve signale naloga (ili samo uredjaja ako nema naloga). */
+function alertScopeWhere(device: { id: string; userId: string | null }) {
+  return device.userId ? { device: { userId: device.userId } } : { deviceId: device.id };
+}
+
+async function countAlerts(device: { id: string; userId: string | null }): Promise<{
+  total: number;
+  active: number;
+}> {
+  const where = alertScopeWhere(device);
+  const [total, active] = await Promise.all([
+    prisma.alert.count({ where }),
+    prisma.alert.count({ where: { ...where, isActive: true } }),
+  ]);
+  return { total, active };
+}
+
 async function freeUserDeviceSlot(
   userId: string,
   currentDeviceId: string,
@@ -219,9 +279,13 @@ async function buildProfilePayload(deviceId: string) {
 
   const isLocked = !trialActive && !isDrugarskiActive && !hasActiveSub;
 
-  const signalCount = user?.id
-    ? await prisma.alert.count({ where: { device: { userId: user.id } } })
-    : await prisma.alert.count({ where: { deviceId } });
+  // signalCount = ukupno sacuvanih signala, activeSignalCount = ukljucenih.
+  // Limit plana se odnosi na aktivne; isto toliko sme da stoji u rezervi
+  // (pauzirani signali / nacrti).
+  const { total: signalCount, active: activeSignalCount } = await countAlerts({
+    id: device.id,
+    userId: device.userId,
+  });
 
   return {
     deviceId: device.id,
@@ -239,7 +303,10 @@ async function buildProfilePayload(deviceId: string) {
       : null,
     planTier,
     alertLimit: effectiveAlertLimit,
+    draftLimit: effectiveAlertLimit,
+    totalAlertLimit: effectiveAlertLimit * 2,
     signalCount,
+    activeSignalCount,
     pricingPlans: PRICING_PLANS,
     freeBronzeCode: FREE_BRONZE_CODE,
     trialActive,
@@ -542,35 +609,28 @@ export async function createAlert(req: Request, res: Response) {
     return res.status(404).json({ error: "Uredjaj nije pronadjen" });
   }
 
-  const user = (device.user as Pick<ProfileUserLite, "planTier" | "promoCodeUsed" | "trialStartedAt" | "subscription"> | null) ?? null;
+  const { maxActive, maxTotal } = resolveAlertLimits(device as DeviceWithPlan);
 
-  const planTier = (user?.planTier ?? "FREE") as PlanTier;
-  const isDrugarskiActive = user?.promoCodeUsed === FREE_BRONZE_CODE;
-  const deviceTrialStartedAt = (device as { trialStartedAt?: Date | null }).trialStartedAt ?? null;
-  const trialStart = user?.trialStartedAt ?? deviceTrialStartedAt;
-  const { trialActive } = computeTrialStatus(trialStart);
-  const hasActiveSub = hasPaidAccess((user?.subscription as SubscriptionLite | null) ?? null);
-
-  const maxAlerts = isDrugarskiActive
-    ? 5
-    : hasActiveSub
-      ? getTierAlertLimit(planTier)
-      : trialActive
-        ? getTierAlertLimit("BRONZE")
-        : 0;
-
-  if (maxAlerts === 0) {
+  if (maxActive === 0) {
     return res.status(403).json({
       error: "Probni period je istekao. Kupi plan ili unesi promo kod.",
     });
   }
-  const count = device.userId
-    ? await prisma.alert.count({ where: { device: { userId: device.userId } } })
-    : await prisma.alert.count({ where: { deviceId } });
 
-  if (count >= maxAlerts) {
+  // Signal se po defaultu pravi aktivan; klijent moze da posalje isActive:false
+  // da bi ga sacuvao kao nacrt (rezervu) i kad su sva aktivna mesta zauzeta.
+  const wantsActive = req.body?.isActive !== false;
+  const { total: alertCount, active: activeCount } = await countAlerts(device);
+
+  if (alertCount >= maxTotal) {
     return res.status(400).json({
-      error: `Dostignut maksimalan broj signala (${maxAlerts}) za tvoj plan.`,
+      error: `Dostignut maksimalan broj signala (${maxActive} aktivnih + ${maxActive} u rezervi) za tvoj plan.`,
+    });
+  }
+
+  if (wantsActive && activeCount >= maxActive) {
+    return res.status(400).json({
+      error: `Dostignut limit aktivnih signala (${maxActive}). Pauziraj neki postojeci signal ili sacuvaj ovaj kao nacrt.`,
     });
   }
 
@@ -586,6 +646,7 @@ export async function createAlert(req: Request, res: Response) {
       yearTo,
       kmFrom,
       kmTo,
+      isActive: wantsActive,
     },
   });
 
@@ -766,8 +827,57 @@ export async function toggleAlert(req: Request, res: Response) {
     return res.status(400).json({ error: "Alert ID je obavezan" });
   }
 
-  const alert = await prisma.alert.findUnique({ where: { id } });
+  const alert = await prisma.alert.findUnique({
+    where: { id },
+    include: {
+      device: {
+        select: {
+          id: true,
+          userId: true,
+          trialStartedAt: true,
+          user: {
+            select: {
+              planTier: true,
+              promoCodeUsed: true,
+              trialStartedAt: true,
+              subscription: {
+                select: {
+                  tier: true,
+                  status: true,
+                  productId: true,
+                  startedAt: true,
+                  renewsAt: true,
+                  pausedAt: true,
+                  cancelledAt: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
   if (!alert) return res.status(404).json({ error: "Alert nije pronadjen" });
+
+  // Pauziranje je uvek dozvoljeno. Ukljucivanje sme samo ako ima slobodnog
+  // aktivnog mesta - inace bi korisnik mogao da zaobidje limit plana tako sto
+  // napravi signale kao nacrte pa ih sve ukljuci.
+  if (!alert.isActive) {
+    const { maxActive } = resolveAlertLimits(alert.device as DeviceWithPlan);
+
+    if (maxActive === 0) {
+      return res.status(403).json({
+        error: "Probni period je istekao. Kupi plan ili unesi promo kod.",
+      });
+    }
+
+    const { active } = await countAlerts(alert.device);
+    if (active >= maxActive) {
+      return res.status(400).json({
+        error: `Dostignut limit aktivnih signala (${maxActive}). Pauziraj drugi signal pa ukljuci ovaj.`,
+      });
+    }
+  }
 
   const updated = await prisma.alert.update({
     where: { id },
