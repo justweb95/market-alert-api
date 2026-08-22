@@ -102,6 +102,9 @@ model Alert {
   bodyTypes    String[]
   // Moto filteri: motoTypes = NAKED, SPORT, CHOPPER, ENDURO, SKUTER, TURING, ATV, KLASIK
   motoTypes    String[]
+  // Regioni Srbije (BEOGRAD, VOJVODINA, ZAPADNA, ISTOCNA, JUZNA, KOSOVO).
+  // Prazan niz = cela Srbija.
+  regions      String[]
   ccmFrom      Int?
   ccmTo        Int?
   isActive     Boolean  @default(true)

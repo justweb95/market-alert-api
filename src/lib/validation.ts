@@ -121,6 +121,10 @@ export const createAlertSchema = z.object({
     )
     .max(8)
     .optional(),
+  regions: z
+    .array(z.enum(["BEOGRAD", "VOJVODINA", "ZAPADNA", "ISTOCNA", "JUZNA", "KOSOVO"] as const))
+    .max(6)
+    .optional(),
   ccmFrom: z.number().int().positive('Kubikaža mora biti pozitivna').max(10000).nullish(),
   ccmTo: z.number().int().positive('Kubikaža mora biti pozitivna').max(10000).nullish(),
   isActive: z.boolean().default(true),

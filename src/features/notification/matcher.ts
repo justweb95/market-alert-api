@@ -1,4 +1,5 @@
 import { prisma } from "../../db/prisma.js";
+import { REGION_CITIES, REGION_CODES, type RegionCode } from "./regions.js";
 import { sendExpoPushNotification } from "./expoPush.service.js";
 
 const MAX_NOTIFICATION_RETRIES = 3;
@@ -18,6 +19,7 @@ type AlertWithDevice = {
   fuelTypes: string[];
   bodyTypes: string[];
   motoTypes: string[];
+  regions: string[];
   ccmFrom: number | null;
   ccmTo: number | null;
   isActive: boolean;
@@ -429,6 +431,38 @@ function getListingCcm(listing: ListingRow): number | null {
   return parseCcmText(raw.ccm) ?? parseCcmText(listing.title);
 }
 
+// Grad iz oglasa -> region Srbije. Duza imena se proveravaju prva ("backa
+// palanka" pre "bac"), a imena kraca od 5 slova moraju da budu cela rec da
+// "ub" ne bi uhvatilo "ljubovija".
+const CITY_TO_REGION: { city: string; region: RegionCode }[] = REGION_CODES.flatMap((code) =>
+  REGION_CITIES[code].map((city) => ({ city, region: code })),
+).sort((a, b) => b.city.length - a.city.length);
+
+function getListingRegion(listing: ListingRow): RegionCode | null {
+  const location = normalizeForMatch(listing.locationText ?? "");
+  const haystack = location || buildListingText(listing);
+  if (!haystack) return null;
+
+  const words = new Set(haystack.split(/[^a-z0-9]+/).filter(Boolean));
+
+  for (const entry of CITY_TO_REGION) {
+    if (entry.city.length < 5) {
+      if (words.has(entry.city)) return entry.region;
+      continue;
+    }
+    if (haystack.includes(entry.city)) return entry.region;
+  }
+
+  return null;
+}
+
+function regionMatches(listing: ListingRow, regions: string[]): boolean {
+  if (regions.length === 0) return true; // cela Srbija
+  const region = getListingRegion(listing);
+  if (!region) return false; // nepoznata lokacija - ne salji dok je filter ukljucen
+  return regions.includes(region);
+}
+
 function locationMatches(listing: ListingRow, locationText: string): boolean {
   const target = normalizeForMatch(locationText);
   if (!target) return true;
@@ -476,6 +510,10 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
   }
 
   if (!locationMatches(listing, alert.locationText)) {
+    return false;
+  }
+
+  if (!regionMatches(listing, alert.regions)) {
     return false;
   }
 
@@ -579,6 +617,7 @@ export async function matchAndNotify(
       fuelTypes: true,
       bodyTypes: true,
       motoTypes: true,
+      regions: true,
       ccmFrom: true,
       ccmTo: true,
       isActive: true,

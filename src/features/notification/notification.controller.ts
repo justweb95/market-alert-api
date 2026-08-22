@@ -6,6 +6,7 @@ import { backfillMatchForAlert } from "./matcher.js";
 import { FREE_BRONZE_CODE } from "../../lib/constants.js";
 import { sendVerificationEmail } from "../../lib/email.service.js";
 import { verifyGoogleIdToken } from "../../lib/googleAuth.js";
+import { REGION_CODES } from "./regions.js";
 
 type PlanTier = "FREE" | "BRONZE" | "SILVER" | "GOLD";
 type SubscriptionStatus = "TRIAL" | "ACTIVE" | "PAUSED" | "EXPIRED" | "CANCELLED";
@@ -84,6 +85,7 @@ function getSingleString(value: unknown): string | null {
 }
 
 const ALLOWED_FUEL_TYPES = new Set(["BENZIN", "DIZEL", "HIBRID", "ELEKTRO", "TNG", "CNG"]);
+const ALLOWED_REGIONS = new Set<string>(REGION_CODES);
 const ALLOWED_MOTO_TYPES = new Set([
   "NAKED",
   "SPORT",
@@ -586,6 +588,7 @@ export async function createAlert(req: Request, res: Response) {
   const motoTypes = getEnumList(req.body?.motoTypes, ALLOWED_MOTO_TYPES);
   const ccmFrom = getOptionalInt(req.body?.ccmFrom);
   const ccmTo = getOptionalInt(req.body?.ccmTo);
+  const regions = getEnumList(req.body?.regions, ALLOWED_REGIONS);
 
   const normalizedCategory = category?.toUpperCase() ?? null;
   const isAllCategory = normalizedCategory === "SVE";
@@ -698,6 +701,7 @@ export async function createAlert(req: Request, res: Response) {
       fuelTypes,
       bodyTypes,
       motoTypes,
+      regions,
       ccmFrom,
       ccmTo,
       isActive: wantsActive,
@@ -834,6 +838,9 @@ export async function updateAlert(req: Request, res: Response) {
     : existing.motoTypes;
   const ccmFrom = hasField("ccmFrom") ? getOptionalInt(req.body?.ccmFrom) : existing.ccmFrom;
   const ccmTo = hasField("ccmTo") ? getOptionalInt(req.body?.ccmTo) : existing.ccmTo;
+  const regions = hasField("regions")
+    ? getEnumList(req.body?.regions, ALLOWED_REGIONS)
+    : existing.regions;
 
   // Ista pravila validacije kao kod kreiranja signala.
   if (!isAllCategory && (!priceMax || priceMax <= 0)) {
@@ -877,6 +884,7 @@ export async function updateAlert(req: Request, res: Response) {
       fuelTypes,
       bodyTypes,
       motoTypes,
+      regions,
       ccmFrom,
       ccmTo,
     },
