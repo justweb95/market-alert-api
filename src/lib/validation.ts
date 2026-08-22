@@ -106,6 +106,23 @@ export const createAlertSchema = z.object({
     )
     .max(9)
     .optional(),
+  motoTypes: z
+    .array(
+      z.enum([
+        "NAKED",
+        "SPORT",
+        "CHOPPER",
+        "ENDURO",
+        "SKUTER",
+        "TURING",
+        "ATV",
+        "KLASIK",
+      ] as const),
+    )
+    .max(8)
+    .optional(),
+  ccmFrom: z.number().int().positive('Kubikaža mora biti pozitivna').max(10000).nullish(),
+  ccmTo: z.number().int().positive('Kubikaža mora biti pozitivna').max(10000).nullish(),
   isActive: z.boolean().default(true),
 });
 

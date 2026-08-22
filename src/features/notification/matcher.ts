@@ -17,6 +17,9 @@ type AlertWithDevice = {
   kmTo: number | null;
   fuelTypes: string[];
   bodyTypes: string[];
+  motoTypes: string[];
+  ccmFrom: number | null;
+  ccmTo: number | null;
   isActive: boolean;
   device: { expoPushToken: string };
 };
@@ -306,59 +309,124 @@ function getListingKm(listing: ListingRow): number | null {
   );
 }
 
-// Vrsta goriva i tip karoserije. PolovniAutomobili daje strukturisan podatak
-// (raw.fuel / raw.bodyType), a za KupujemProdajem se prepoznaje iz naslova
-// oglasa (npr. "1.9 TDI" -> dizel, "Karavan" -> karavan).
-const FUEL_PATTERNS: { value: string; re: RegExp }[] = [
-  { value: "DIZEL", re: /(dizel|diesel|tdi|cdi|hdi|dci|jtd|crdi|tdci|d4d|cdti)/ },
-  { value: "TNG", re: /(tng|lpg|autogas|plin|gas)/ },
-  { value: "CNG", re: /(cng|metan)/ },
-  { value: "HIBRID", re: /(hibrid|hybrid|hev|phev|mhev)/ },
-  { value: "ELEKTRO", re: /(elektro|electric|ev|bev|elektricn)/ },
-  { value: "BENZIN", re: /(benzin|petrol|tsi|tfsi|fsi|mpi|vti|gti|thp)/ },
+// Vrsta goriva, tip karoserije i tip motora.
+//
+// PolovniAutomobili daje strukturisan podatak (raw.fuel / raw.bodyType /
+// raw.motoType), a za KupujemProdajem se tip prepoznaje iz teksta oglasa
+// ("1.9 TDI" -> dizel, "karavan" -> karavan).
+//
+// substrings = trazi se bilo gde u tekstu (duze reci, nema lazno pozitivnih)
+// tokens     = mora da bude cela rec (kratke skracenice: tdi, ev, gas...),
+//              da "Beverly" ne bi bilo prepoznato kao elektricno ("ev").
+type TextPattern = { value: string; substrings: string[]; tokens: string[] };
+
+const FUEL_PATTERNS: TextPattern[] = [
+  {
+    value: "DIZEL",
+    substrings: ["dizel", "diesel"],
+    tokens: ["tdi", "cdi", "hdi", "dci", "jtd", "crdi", "tdci", "cdti", "d4d"],
+  },
+  { value: "TNG", substrings: ["autogas"], tokens: ["tng", "lpg", "gas", "plin"] },
+  { value: "CNG", substrings: ["metan"], tokens: ["cng"] },
+  { value: "HIBRID", substrings: ["hibrid", "hybrid"], tokens: ["hev", "phev", "mhev"] },
+  { value: "ELEKTRO", substrings: ["elektro", "electric", "elektricn"], tokens: ["ev", "bev"] },
+  {
+    value: "BENZIN",
+    substrings: ["benzin", "petrol"],
+    tokens: ["tsi", "tfsi", "fsi", "mpi", "vti", "gti", "thp"],
+  },
 ];
 
-const BODY_PATTERNS: { value: string; re: RegExp }[] = [
-  { value: "SUV", re: /(suv|dzip|jeep|terenac|crossover|krosover)/ },
-  { value: "KARAVAN", re: /(karavan|station wagon|wagon|estate|sw)/ },
-  { value: "KOMBI", re: /(kombi|van|putnicki kombi)/ },
-  { value: "HECBEK", re: /(hecbek|hatchback|hec bek)/ },
-  { value: "LIMUZINA", re: /(limuzina|sedan)/ },
-  { value: "KUPE", re: /(kupe|coupe)/ },
-  { value: "KABRIOLET", re: /(kabriolet|kabrio|cabrio|roadster|spider)/ },
-  { value: "MONOVOLUMEN", re: /(monovolumen|minivan|mini van|mpv)/ },
-  { value: "PIKAP", re: /(pickup|pick up|pikap)/ },
+const BODY_PATTERNS: TextPattern[] = [
+  {
+    value: "SUV",
+    substrings: ["dzip", "jeep", "terenac", "crossover", "krosover"],
+    tokens: ["suv"],
+  },
+  { value: "KARAVAN", substrings: ["karavan", "station wagon"], tokens: ["wagon", "estate", "sw"] },
+  { value: "KOMBI", substrings: ["kombi"], tokens: ["van"] },
+  { value: "HECBEK", substrings: ["hecbek", "hatchback", "hec bek"], tokens: [] },
+  { value: "LIMUZINA", substrings: ["limuzina"], tokens: ["sedan"] },
+  { value: "KUPE", substrings: ["coupe"], tokens: ["kupe"] },
+  { value: "KABRIOLET", substrings: ["kabriolet", "kabrio", "cabrio", "roadster"], tokens: ["spider"] },
+  { value: "MONOVOLUMEN", substrings: ["monovolumen", "minivan", "mini van"], tokens: ["mpv"] },
+  { value: "PIKAP", substrings: ["pickup", "pick up", "pikap"], tokens: [] },
 ];
 
-function matchPatterns(
-  text: string,
-  patterns: { value: string; re: RegExp }[],
-): Set<string> {
+const MOTO_TYPE_PATTERNS: TextPattern[] = [
+  { value: "SKUTER", substrings: ["skuter", "scooter", "moped"], tokens: [] },
+  { value: "ATV", substrings: ["quad", "kvad"], tokens: ["atv"] },
+  {
+    value: "ENDURO",
+    substrings: ["enduro", "motocross", "supermoto", "adventure"],
+    tokens: ["cross", "gs"],
+  },
+  { value: "CHOPPER", substrings: ["chopper", "cruiser", "custom", "bobber"], tokens: [] },
+  { value: "TURING", substrings: ["touring", "turing"], tokens: [] },
+  { value: "SPORT", substrings: ["superbike", "supersport"], tokens: ["sport"] },
+  { value: "NAKED", substrings: ["naked"], tokens: ["street"] },
+  { value: "KLASIK", substrings: ["klasik", "classic", "oldtajmer", "oldtimer", "retro"], tokens: [] },
+];
+
+/** Tekst je vec normalizovan (mala slova, bez dijakritike) kroz normalizeForMatch. */
+function matchPatterns(text: string, patterns: TextPattern[]): Set<string> {
+  const words = new Set(text.split(/[^a-z0-9]+/).filter(Boolean));
   const found = new Set<string>();
+
   for (const pattern of patterns) {
-    if (pattern.re.test(text)) found.add(pattern.value);
+    if (pattern.substrings.some((needle) => text.includes(needle))) {
+      found.add(pattern.value);
+      continue;
+    }
+    if (pattern.tokens.some((token) => words.has(token))) {
+      found.add(pattern.value);
+    }
   }
+
   return found;
 }
 
-function getListingFuels(listing: ListingRow): Set<string> {
+/** Strukturisan podatak iz raw ima prednost; ako ga nema, gleda se ceo tekst oglasa. */
+function matchListingAttribute(
+  listing: ListingRow,
+  rawKey: string,
+  patterns: TextPattern[],
+): Set<string> {
   const raw = extractRawObject(listing);
-  const structured = normalizeForMatch(String(raw.fuel ?? ""));
+  const structured = normalizeForMatch(String(raw[rawKey] ?? ""));
   if (structured) {
-    const fromStructured = matchPatterns(structured, FUEL_PATTERNS);
+    const fromStructured = matchPatterns(structured, patterns);
     if (fromStructured.size > 0) return fromStructured;
   }
-  return matchPatterns(buildListingText(listing), FUEL_PATTERNS);
+  return matchPatterns(buildListingText(listing), patterns);
+}
+
+function getListingFuels(listing: ListingRow): Set<string> {
+  return matchListingAttribute(listing, "fuel", FUEL_PATTERNS);
 }
 
 function getListingBodyTypes(listing: ListingRow): Set<string> {
+  return matchListingAttribute(listing, "bodyType", BODY_PATTERNS);
+}
+
+function getListingMotoTypes(listing: ListingRow): Set<string> {
+  return matchListingAttribute(listing, "motoType", MOTO_TYPE_PATTERNS);
+}
+
+/** Kubikaza motora: "689 cm3", "125 ccm", "1.000 cm3". */
+function parseCcmText(value: unknown): number | null {
+  const match = String(value ?? "")
+    .toLowerCase()
+    .match(/([0-9][0-9. ]*) *(cm3|ccm|kubika)/);
+  if (!match || !match[1]) return null;
+
+  const parsed = Number(match[1].replace(/[. ]/g, ""));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function getListingCcm(listing: ListingRow): number | null {
   const raw = extractRawObject(listing);
-  const structured = normalizeForMatch(String(raw.bodyType ?? ""));
-  if (structured) {
-    const fromStructured = matchPatterns(structured, BODY_PATTERNS);
-    if (fromStructured.size > 0) return fromStructured;
-  }
-  return matchPatterns(buildListingText(listing), BODY_PATTERNS);
+  return parseCcmText(raw.ccm) ?? parseCcmText(listing.title);
 }
 
 function locationMatches(listing: ListingRow, locationText: string): boolean {
@@ -440,6 +508,19 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
     if (!alert.bodyTypes.some((body) => bodies.has(body))) return false;
   }
 
+  if (alert.motoTypes.length > 0) {
+    const motoTypes = getListingMotoTypes(listing);
+    if (motoTypes.size === 0) return false;
+    if (!alert.motoTypes.some((type) => motoTypes.has(type))) return false;
+  }
+
+  if (alert.ccmFrom !== null || alert.ccmTo !== null) {
+    const ccm = getListingCcm(listing);
+    if (ccm === null) return false;
+    if (alert.ccmFrom !== null && ccm < alert.ccmFrom) return false;
+    if (alert.ccmTo !== null && ccm > alert.ccmTo) return false;
+  }
+
   const listingPriceEur = getListingPriceEur(listing);
 
   // For "SVE" category, matching intentionally relies only on keywords.
@@ -497,6 +578,9 @@ export async function matchAndNotify(
       kmTo: true,
       fuelTypes: true,
       bodyTypes: true,
+      motoTypes: true,
+      ccmFrom: true,
+      ccmTo: true,
       isActive: true,
       device: { select: { expoPushToken: true } },
     },

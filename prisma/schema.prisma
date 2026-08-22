@@ -100,6 +100,10 @@ model Alert {
   // bodyTypes:  LIMUZINA, HECBEK, KARAVAN, SUV, KUPE, KABRIOLET, MONOVOLUMEN, PIKAP, KOMBI
   fuelTypes    String[]
   bodyTypes    String[]
+  // Moto filteri: motoTypes = NAKED, SPORT, CHOPPER, ENDURO, SKUTER, TURING, ATV, KLASIK
+  motoTypes    String[]
+  ccmFrom      Int?
+  ccmTo        Int?
   isActive     Boolean  @default(true)
 
   createdAt DateTime @default(now())

@@ -84,6 +84,16 @@ function getSingleString(value: unknown): string | null {
 }
 
 const ALLOWED_FUEL_TYPES = new Set(["BENZIN", "DIZEL", "HIBRID", "ELEKTRO", "TNG", "CNG"]);
+const ALLOWED_MOTO_TYPES = new Set([
+  "NAKED",
+  "SPORT",
+  "CHOPPER",
+  "ENDURO",
+  "SKUTER",
+  "TURING",
+  "ATV",
+  "KLASIK",
+]);
 const ALLOWED_BODY_TYPES = new Set([
   "LIMUZINA",
   "HECBEK",
@@ -573,6 +583,9 @@ export async function createAlert(req: Request, res: Response) {
   const kmTo = getOptionalInt(req.body?.kmTo);
   const fuelTypes = getEnumList(req.body?.fuelTypes, ALLOWED_FUEL_TYPES);
   const bodyTypes = getEnumList(req.body?.bodyTypes, ALLOWED_BODY_TYPES);
+  const motoTypes = getEnumList(req.body?.motoTypes, ALLOWED_MOTO_TYPES);
+  const ccmFrom = getOptionalInt(req.body?.ccmFrom);
+  const ccmTo = getOptionalInt(req.body?.ccmTo);
 
   const normalizedCategory = category?.toUpperCase() ?? null;
   const isAllCategory = normalizedCategory === "SVE";
@@ -608,6 +621,10 @@ export async function createAlert(req: Request, res: Response) {
 
   if (kmFrom !== null && kmTo !== null && kmFrom > kmTo) {
     return res.status(400).json({ error: "Kilometraza od ne moze biti veca od kilometraze do" });
+  }
+
+  if (ccmFrom !== null && ccmTo !== null && ccmFrom > ccmTo) {
+    return res.status(400).json({ error: "Kubikaza od ne moze biti veca od kubikaze do" });
   }
 
   const device = await prisma.device.findUnique({
@@ -680,6 +697,9 @@ export async function createAlert(req: Request, res: Response) {
       kmTo,
       fuelTypes,
       bodyTypes,
+      motoTypes,
+      ccmFrom,
+      ccmTo,
       isActive: wantsActive,
     },
   });
@@ -809,6 +829,11 @@ export async function updateAlert(req: Request, res: Response) {
   const bodyTypes = hasField("bodyTypes")
     ? getEnumList(req.body?.bodyTypes, ALLOWED_BODY_TYPES)
     : existing.bodyTypes;
+  const motoTypes = hasField("motoTypes")
+    ? getEnumList(req.body?.motoTypes, ALLOWED_MOTO_TYPES)
+    : existing.motoTypes;
+  const ccmFrom = hasField("ccmFrom") ? getOptionalInt(req.body?.ccmFrom) : existing.ccmFrom;
+  const ccmTo = hasField("ccmTo") ? getOptionalInt(req.body?.ccmTo) : existing.ccmTo;
 
   // Ista pravila validacije kao kod kreiranja signala.
   if (!isAllCategory && (!priceMax || priceMax <= 0)) {
@@ -833,6 +858,10 @@ export async function updateAlert(req: Request, res: Response) {
     return res.status(400).json({ error: "Kilometraza od ne moze biti veca od kilometraze do" });
   }
 
+  if (ccmFrom !== null && ccmTo !== null && ccmFrom > ccmTo) {
+    return res.status(400).json({ error: "Kubikaza od ne moze biti veca od kubikaze do" });
+  }
+
   const updated = await prisma.alert.update({
     where: { id },
     data: {
@@ -847,6 +876,9 @@ export async function updateAlert(req: Request, res: Response) {
       kmTo,
       fuelTypes,
       bodyTypes,
+      motoTypes,
+      ccmFrom,
+      ccmTo,
     },
   });
 
