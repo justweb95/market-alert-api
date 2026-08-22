@@ -54,10 +54,12 @@ const TIER_ALERT_LIMIT: Record<PlanTier, number> = {
   GOLD: 10,
 };
 
+// alerts = koliko signala sme istovremeno da bude ukljuceno,
+// drafts = koliko jos sme da stoji sacuvano u rezervi (nacrti/pauzirani).
 const PRICING_PLANS = [
-  { tier: "BRONZE", alerts: 3, monthlyEur: 10 },
-  { tier: "SILVER", alerts: 6, monthlyEur: 15 },
-  { tier: "GOLD", alerts: 10, monthlyEur: 20 },
+  { tier: "BRONZE", alerts: 3, drafts: 3, monthlyEur: 10 },
+  { tier: "SILVER", alerts: 6, drafts: 6, monthlyEur: 15 },
+  { tier: "GOLD", alerts: 10, drafts: 10, monthlyEur: 20 },
 ] as const;
 
 function normalizePlatform(platform: unknown): "ANDROID" | "IOS" | "WEB" | null {
