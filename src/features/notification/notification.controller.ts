@@ -399,6 +399,10 @@ export async function registerDevice(req: Request, res: Response) {
             passwordHash: hashPassword(randomBytes(32).toString("hex")),
             googleId: identity.googleId,
             emailVerified: identity.emailVerified,
+            // Trial krece od trenutka registracije naloga, pa svaki nov korisnik
+            // dobija pun broj dana (ranije se nasledjivao datum kreiranja Device
+            // reda, pa je korisnik koji je app otvorio pre par dana dobijao manje).
+            trialStartedAt: new Date(),
           },
         });
         resolvedUserId = createdUser.id;
@@ -443,6 +447,8 @@ export async function registerDevice(req: Request, res: Response) {
             passwordHash: hashPassword(password),
             emailVerifyToken,
             emailVerifyTokenExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            // Trial krece od trenutka registracije naloga (pun broj dana).
+            trialStartedAt: new Date(),
           },
         });
         resolvedUserId = createdUser.id;
@@ -1112,14 +1118,14 @@ export async function updateProfile(req: Request, res: Response) {
       });
       userId = linked.userId;
     } else {
-      // New user: inherit the device's trialStartedAt so reinstall doesn't reset trial
+      // Nov nalog = pun trial od trenutka registracije (isto kao na /devices ruti).
       const created = await prisma.user.create({
         data: {
           firstName,
           lastName,
           email: normalizedEmail,
           passwordHash: hashPassword(password),
-          trialStartedAt: ((device as { trialStartedAt?: Date | null }).trialStartedAt ?? new Date()),
+          trialStartedAt: new Date(),
         },
       });
       const linked = await prisma.device.update({
