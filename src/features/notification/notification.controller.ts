@@ -629,6 +629,135 @@ export async function getAlerts(req: Request, res: Response) {
   return res.status(200).json(alerts);
 }
 
+// PATCH /api/notifications/alerts/:id
+// Izmena postojeceg signala. Namerno NE dira isActive (pauziran signal ostaje
+// pauziran posle izmene) i NE proverava limit plana - broj signala se izmenom
+// ne menja, pa korisnik moze da izmeni signal i kad je na maksimumu.
+export async function updateAlert(req: Request, res: Response) {
+  const id = getSingleString(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({ error: "Alert ID je obavezan" });
+  }
+
+  const existing = await prisma.alert.findUnique({
+    where: { id },
+    include: { device: { select: { id: true, userId: true } } },
+  });
+
+  if (!existing) {
+    return res.status(404).json({ error: "Signal nije pronadjen" });
+  }
+
+  // Provera vlasnistva: klijent salje deviceId sa kojeg menja signal. Signal
+  // sme da menja isti uredjaj ili bilo koji uredjaj povezan sa istim nalogom
+  // (isti princip kao getAlerts, koji vraca signale po nalogu).
+  const requestDeviceId = getSingleString(req.body?.deviceId);
+  if (requestDeviceId && requestDeviceId !== existing.deviceId) {
+    const requestDevice = await prisma.device.findUnique({
+      where: { id: requestDeviceId },
+      select: { id: true, userId: true },
+    });
+
+    const sameUser =
+      !!requestDevice?.userId && requestDevice.userId === existing.device.userId;
+
+    if (!sameUser) {
+      return res.status(403).json({ error: "Signal ne pripada ovom uredjaju" });
+    }
+  }
+
+  // Polja koja klijent nije poslao zadrzavaju postojecu vrednost.
+  const hasField = (key: string) =>
+    Object.prototype.hasOwnProperty.call(req.body ?? {}, key) &&
+    (req.body as Record<string, unknown>)[key] !== undefined;
+
+  const categoryInput = getSingleString(req.body?.category)?.toUpperCase() ?? null;
+  const normalizedCategory = categoryInput ?? existing.category;
+  const isAllCategory = normalizedCategory === "SVE";
+
+  const rawKeywords = Array.isArray(req.body?.keywords) ? req.body.keywords : null;
+  const keywords = rawKeywords
+    ? rawKeywords.filter(
+        (keyword: unknown): keyword is string =>
+          typeof keyword === "string" && keyword.trim().length > 0,
+      )
+    : existing.keywords;
+
+  let priceMax: number | null = existing.priceMax;
+  if (hasField("priceMax")) {
+    const rawPriceMax = Number(req.body?.priceMax);
+    priceMax = Number.isFinite(rawPriceMax) ? Math.round(rawPriceMax) : null;
+  }
+
+  const locationText = hasField("locationText")
+    ? getSingleString(req.body?.locationText) ?? ""
+    : existing.locationText;
+
+  const allowedPropertyTypes = new Set(["STAN", "LOKAL", "PARCELA"]);
+  let propertyType: string | null = existing.propertyType;
+  if (hasField("propertyType")) {
+    const propertyTypeInput = getSingleString(req.body?.propertyType)?.toUpperCase() ?? null;
+    propertyType =
+      propertyTypeInput && allowedPropertyTypes.has(propertyTypeInput)
+        ? propertyTypeInput
+        : null;
+  }
+
+  const yearFrom = hasField("yearFrom") ? getOptionalInt(req.body?.yearFrom) : existing.yearFrom;
+  const yearTo = hasField("yearTo") ? getOptionalInt(req.body?.yearTo) : existing.yearTo;
+  const kmFrom = hasField("kmFrom") ? getOptionalInt(req.body?.kmFrom) : existing.kmFrom;
+  const kmTo = hasField("kmTo") ? getOptionalInt(req.body?.kmTo) : existing.kmTo;
+
+  // Ista pravila validacije kao kod kreiranja signala.
+  if (!isAllCategory && (!priceMax || priceMax <= 0)) {
+    return res.status(400).json({ error: "priceMax je obavezan i mora biti veci od 0" });
+  }
+
+  if (isAllCategory && keywords.length === 0) {
+    return res.status(400).json({ error: "Za kategoriju SVE potrebno je uneti kljucne reci" });
+  }
+
+  if (normalizedCategory === "NEKRETNINE" && !propertyType) {
+    return res.status(400).json({
+      error: "Za nekretnine je obavezno izabrati tip: stan, lokal ili parcela/zemljiste",
+    });
+  }
+
+  if (yearFrom !== null && yearTo !== null && yearFrom > yearTo) {
+    return res.status(400).json({ error: "Godiste od ne moze biti vece od godista do" });
+  }
+
+  if (kmFrom !== null && kmTo !== null && kmFrom > kmTo) {
+    return res.status(400).json({ error: "Kilometraza od ne moze biti veca od kilometraze do" });
+  }
+
+  const updated = await prisma.alert.update({
+    where: { id },
+    data: {
+      category: normalizedCategory,
+      keywords,
+      priceMax: isAllCategory ? 0 : (priceMax as number),
+      locationText: locationText ?? "",
+      propertyType: normalizedCategory === "NEKRETNINE" ? propertyType : null,
+      yearFrom,
+      yearTo,
+      kmFrom,
+      kmTo,
+    },
+  });
+
+  res.status(200).json(updated);
+
+  // Novi kriterijumi -> ponovo prodji kroz vec skinute oglase (NotificationLog
+  // ima unique(alertId, listingId), pa nema duplih notifikacija).
+  backfillMatchForAlert(updated.id).catch((error) => {
+    console.error("[notification] Backfill match failed for alert", updated.id, error);
+  });
+
+  return;
+}
+
 // PATCH /api/notifications/alerts/:id/toggle
 export async function toggleAlert(req: Request, res: Response) {
   const id = getSingleString(req.params.id);

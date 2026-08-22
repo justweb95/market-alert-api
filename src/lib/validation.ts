@@ -89,9 +89,10 @@ export const createAlertSchema = z.object({
 });
 
 // Alert Update
-export const updateAlertSchema = createAlertSchema.partial().omit({
-  deviceId: true,
-});
+// Sva polja su opciona - controller zadrzava postojecu vrednost za ono sto
+// klijent ne posalje. deviceId ostaje (opciono) da bi controller mogao da
+// proveri vlasnistvo nad signalom.
+export const updateAlertSchema = createAlertSchema.partial();
 
 // Register User (optional, for future auth)
 export const registerUserSchema = z.object({
