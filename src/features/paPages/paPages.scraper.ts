@@ -10,6 +10,8 @@ export interface PaListing {
   model: string;
   year: string;
   fuel: string;
+  /** Tip karoserije iz PA alt teksta ("Džip/SUV", "Limuzina", "Hečbek"...). */
+  bodyType: string;
   km: string;
   priceEur: string;
   city: string;
@@ -117,6 +119,7 @@ export async function scrapePaLatestCars(opts?: { take?: number; timeoutMs?: num
         model: '',
         year: detail?.[1] ?? '',
         fuel: detail?.[3]?.trim() ?? '',
+        bodyType: detail?.[2]?.trim() ?? '',
         km: detail?.[5] ?? '',
         priceEur: parsed.priceEur,
         city: detail?.[6]?.trim() ?? lastCsvSegment(parsed.rest),

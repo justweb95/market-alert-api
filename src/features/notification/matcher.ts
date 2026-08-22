@@ -15,6 +15,8 @@ type AlertWithDevice = {
   yearTo: number | null;
   kmFrom: number | null;
   kmTo: number | null;
+  fuelTypes: string[];
+  bodyTypes: string[];
   isActive: boolean;
   device: { expoPushToken: string };
 };
@@ -304,6 +306,61 @@ function getListingKm(listing: ListingRow): number | null {
   );
 }
 
+// Vrsta goriva i tip karoserije. PolovniAutomobili daje strukturisan podatak
+// (raw.fuel / raw.bodyType), a za KupujemProdajem se prepoznaje iz naslova
+// oglasa (npr. "1.9 TDI" -> dizel, "Karavan" -> karavan).
+const FUEL_PATTERNS: { value: string; re: RegExp }[] = [
+  { value: "DIZEL", re: /(dizel|diesel|tdi|cdi|hdi|dci|jtd|crdi|tdci|d4d|cdti)/ },
+  { value: "TNG", re: /(tng|lpg|autogas|plin|gas)/ },
+  { value: "CNG", re: /(cng|metan)/ },
+  { value: "HIBRID", re: /(hibrid|hybrid|hev|phev|mhev)/ },
+  { value: "ELEKTRO", re: /(elektro|electric|ev|bev|elektricn)/ },
+  { value: "BENZIN", re: /(benzin|petrol|tsi|tfsi|fsi|mpi|vti|gti|thp)/ },
+];
+
+const BODY_PATTERNS: { value: string; re: RegExp }[] = [
+  { value: "SUV", re: /(suv|dzip|jeep|terenac|crossover|krosover)/ },
+  { value: "KARAVAN", re: /(karavan|station wagon|wagon|estate|sw)/ },
+  { value: "KOMBI", re: /(kombi|van|putnicki kombi)/ },
+  { value: "HECBEK", re: /(hecbek|hatchback|hec bek)/ },
+  { value: "LIMUZINA", re: /(limuzina|sedan)/ },
+  { value: "KUPE", re: /(kupe|coupe)/ },
+  { value: "KABRIOLET", re: /(kabriolet|kabrio|cabrio|roadster|spider)/ },
+  { value: "MONOVOLUMEN", re: /(monovolumen|minivan|mini van|mpv)/ },
+  { value: "PIKAP", re: /(pickup|pick up|pikap)/ },
+];
+
+function matchPatterns(
+  text: string,
+  patterns: { value: string; re: RegExp }[],
+): Set<string> {
+  const found = new Set<string>();
+  for (const pattern of patterns) {
+    if (pattern.re.test(text)) found.add(pattern.value);
+  }
+  return found;
+}
+
+function getListingFuels(listing: ListingRow): Set<string> {
+  const raw = extractRawObject(listing);
+  const structured = normalizeForMatch(String(raw.fuel ?? ""));
+  if (structured) {
+    const fromStructured = matchPatterns(structured, FUEL_PATTERNS);
+    if (fromStructured.size > 0) return fromStructured;
+  }
+  return matchPatterns(buildListingText(listing), FUEL_PATTERNS);
+}
+
+function getListingBodyTypes(listing: ListingRow): Set<string> {
+  const raw = extractRawObject(listing);
+  const structured = normalizeForMatch(String(raw.bodyType ?? ""));
+  if (structured) {
+    const fromStructured = matchPatterns(structured, BODY_PATTERNS);
+    if (fromStructured.size > 0) return fromStructured;
+  }
+  return matchPatterns(buildListingText(listing), BODY_PATTERNS);
+}
+
 function locationMatches(listing: ListingRow, locationText: string): boolean {
   const target = normalizeForMatch(locationText);
   if (!target) return true;
@@ -368,6 +425,21 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
     if (alert.kmTo !== null && km > alert.kmTo) return false;
   }
 
+  // Gorivo / karoserija: prazan niz = korisnik nije filtrirao. Ako je filter
+  // ukljucen, a oglas nema prepoznatljiv podatak, oglas se NE salje (isto
+  // ponasanje kao kod godista i kilometraze).
+  if (alert.fuelTypes.length > 0) {
+    const fuels = getListingFuels(listing);
+    if (fuels.size === 0) return false;
+    if (!alert.fuelTypes.some((fuel) => fuels.has(fuel))) return false;
+  }
+
+  if (alert.bodyTypes.length > 0) {
+    const bodies = getListingBodyTypes(listing);
+    if (bodies.size === 0) return false;
+    if (!alert.bodyTypes.some((body) => bodies.has(body))) return false;
+  }
+
   const listingPriceEur = getListingPriceEur(listing);
 
   // For "SVE" category, matching intentionally relies only on keywords.
@@ -423,6 +495,8 @@ export async function matchAndNotify(
       yearTo: true,
       kmFrom: true,
       kmTo: true,
+      fuelTypes: true,
+      bodyTypes: true,
       isActive: true,
       device: { select: { expoPushToken: true } },
     },

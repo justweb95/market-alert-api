@@ -95,6 +95,11 @@ model Alert {
   yearTo       Int?
   kmFrom       Int?
   kmTo         Int?
+  // Filteri za vozila. Prazan niz = "nije bitno" (bez filtriranja).
+  // fuelTypes:  BENZIN, DIZEL, HIBRID, ELEKTRO, TNG, CNG
+  // bodyTypes:  LIMUZINA, HECBEK, KARAVAN, SUV, KUPE, KABRIOLET, MONOVOLUMEN, PIKAP, KOMBI
+  fuelTypes    String[]
+  bodyTypes    String[]
   isActive     Boolean  @default(true)
 
   createdAt DateTime @default(now())

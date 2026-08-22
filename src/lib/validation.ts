@@ -85,6 +85,27 @@ export const createAlertSchema = z.object({
     .int()
     .positive('Kilometraža mora biti pozitivna')
     .nullish(),
+  // Filteri za vozila - prazan niz znaci "nije bitno".
+  fuelTypes: z
+    .array(z.enum(["BENZIN", "DIZEL", "HIBRID", "ELEKTRO", "TNG", "CNG"] as const))
+    .max(6)
+    .optional(),
+  bodyTypes: z
+    .array(
+      z.enum([
+        "LIMUZINA",
+        "HECBEK",
+        "KARAVAN",
+        "KOMBI",
+        "SUV",
+        "KUPE",
+        "KABRIOLET",
+        "MONOVOLUMEN",
+        "PIKAP",
+      ] as const),
+    )
+    .max(9)
+    .optional(),
   isActive: z.boolean().default(true),
 });
 

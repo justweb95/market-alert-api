@@ -83,6 +83,30 @@ function getSingleString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+const ALLOWED_FUEL_TYPES = new Set(["BENZIN", "DIZEL", "HIBRID", "ELEKTRO", "TNG", "CNG"]);
+const ALLOWED_BODY_TYPES = new Set([
+  "LIMUZINA",
+  "HECBEK",
+  "KARAVAN",
+  "KOMBI",
+  "SUV",
+  "KUPE",
+  "KABRIOLET",
+  "MONOVOLUMEN",
+  "PIKAP",
+]);
+
+/** Normalizuje listu filtera (gorivo/karoserija): velika slova, bez duplikata,
+ *  samo dozvoljene vrednosti. Prazan niz = bez filtriranja. */
+function getEnumList(value: unknown, allowed: Set<string>): string[] {
+  if (!Array.isArray(value)) return [];
+  const normalized = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim().toUpperCase())
+    .filter((item) => allowed.has(item));
+  return Array.from(new Set(normalized));
+}
+
 function getOptionalInt(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
   const parsed = Number(value);
@@ -547,6 +571,8 @@ export async function createAlert(req: Request, res: Response) {
   const yearTo = getOptionalInt(req.body?.yearTo);
   const kmFrom = getOptionalInt(req.body?.kmFrom);
   const kmTo = getOptionalInt(req.body?.kmTo);
+  const fuelTypes = getEnumList(req.body?.fuelTypes, ALLOWED_FUEL_TYPES);
+  const bodyTypes = getEnumList(req.body?.bodyTypes, ALLOWED_BODY_TYPES);
 
   const normalizedCategory = category?.toUpperCase() ?? null;
   const isAllCategory = normalizedCategory === "SVE";
@@ -652,6 +678,8 @@ export async function createAlert(req: Request, res: Response) {
       yearTo,
       kmFrom,
       kmTo,
+      fuelTypes,
+      bodyTypes,
       isActive: wantsActive,
     },
   });
@@ -775,6 +803,12 @@ export async function updateAlert(req: Request, res: Response) {
   const yearTo = hasField("yearTo") ? getOptionalInt(req.body?.yearTo) : existing.yearTo;
   const kmFrom = hasField("kmFrom") ? getOptionalInt(req.body?.kmFrom) : existing.kmFrom;
   const kmTo = hasField("kmTo") ? getOptionalInt(req.body?.kmTo) : existing.kmTo;
+  const fuelTypes = hasField("fuelTypes")
+    ? getEnumList(req.body?.fuelTypes, ALLOWED_FUEL_TYPES)
+    : existing.fuelTypes;
+  const bodyTypes = hasField("bodyTypes")
+    ? getEnumList(req.body?.bodyTypes, ALLOWED_BODY_TYPES)
+    : existing.bodyTypes;
 
   // Ista pravila validacije kao kod kreiranja signala.
   if (!isAllCategory && (!priceMax || priceMax <= 0)) {
@@ -811,6 +845,8 @@ export async function updateAlert(req: Request, res: Response) {
       yearTo,
       kmFrom,
       kmTo,
+      fuelTypes,
+      bodyTypes,
     },
   });
 
