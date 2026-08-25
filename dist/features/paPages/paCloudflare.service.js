@@ -66,4 +66,16 @@ export async function fetchPaHtml(targetUrl) {
         throw err;
     }
 }
+// 2026-08-20: vidi komentar uz killKpBrowser() — isti problem, isti lek. Zatvaranje
+// samo konteksta ne spasava od zaglavljenog Chromium procesa, mora i browser napolje.
+export function killPaBrowser() {
+    const prevContext = contextPromise;
+    const prevBrowser = browserPromise;
+    contextPromise = null;
+    browserPromise = null;
+    if (prevContext)
+        prevContext.then((ctx) => ctx.close()).catch(() => { });
+    if (prevBrowser)
+        prevBrowser.then((b) => b.close()).catch(() => { });
+}
 //# sourceMappingURL=paCloudflare.service.js.map

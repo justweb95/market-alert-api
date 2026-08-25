@@ -50,7 +50,7 @@ export async function getStatistic(req, res) {
         res.json(statsCache.payload);
         return;
     }
-    const [totalUsers, totalDevices, totalAlerts, totalListings, totalNotifications, totalNotificationLogs, activeAlerts, listingsBySource, notificationsByStatus, usersByPlanTier, subscriptionsByStatus, latestListing, alertsByCategory, activeSubsByTier, totalPaidUsers, drugarskiCount, recentScrapeRuns,] = await Promise.all([
+    const [totalUsers, totalDevices, totalAlerts, totalListings, totalNotifications, totalNotificationLogs, activeAlerts, listingsBySource, notificationsByStatus, usersByPlanTier, subscriptionsByStatus, latestListing, alertsByCategory, activeSubsByTier, totalPaidUsers, drugarskiCount, recentScrapeRuns, lastScrapeRun, lastSuccessfulScrapeRun,] = await Promise.all([
         prisma.user.count(),
         prisma.device.count(),
         prisma.alert.count(),
@@ -81,6 +81,21 @@ export async function getStatistic(req, res) {
                 errorMessage: true,
                 createdAt: true,
             },
+        }),
+        // Vreme poslednjeg ScrapeRun reda BILO KOG ishoda (uspeh ili neuspeh) je jedini
+        // pouzdan signal da li je ingest ciklus uopste izvrsen — pojedinacan izvor
+        // (npr. KP) moze da promasi bez ovoga (recordScrapeRun i dalje pise red), ali
+        // ako se CEO ciklus zaglavi (2026-08-20 incident: Chromium proces visio, nijedan
+        // await se nikad nije zavrsio), nijedan red se ne upisuje uopste — sto je tacno
+        // ono sto trazimo da detektujemo.
+        prisma.scrapeRun.findFirst({
+            orderBy: { createdAt: "desc" },
+            select: { createdAt: true },
+        }),
+        prisma.scrapeRun.findFirst({
+            where: { success: true },
+            orderBy: { createdAt: "desc" },
+            select: { createdAt: true },
         }),
     ]);
     const TIER_PRICE = { FREE: 0, BRONZE: 10, SILVER: 15, GOLD: 20 };
@@ -182,6 +197,21 @@ export async function getStatistic(req, res) {
             notificationsByStatus: notificationsByCurrentUser,
         };
     });
+    // Isti prag koji koristi watchdog (jobs/watchdog.ts) da sam sebe restartuje: 5
+    // propustenih ciklusa. Ovde je informativno, samo za dashboard — watchdog ima
+    // svoju nezavisnu logiku u backend procesu.
+    const scrapeIntervalMinutes = parseInt(process.env.SCRAPE_INTERVAL_MINUTES || "5", 10);
+    const staleThresholdMinutes = scrapeIntervalMinutes * 5;
+    const minutesSinceLastScrapeRun = lastScrapeRun
+        ? Math.floor((Date.now() - lastScrapeRun.createdAt.getTime()) / 60_000)
+        : null;
+    const pipelineHealth = {
+        scrapeIntervalMinutes,
+        lastScrapeRunAt: lastScrapeRun?.createdAt ?? null,
+        lastSuccessfulScrapeAt: lastSuccessfulScrapeRun?.createdAt ?? null,
+        minutesSinceLastScrapeRun,
+        isStale: minutesSinceLastScrapeRun === null || minutesSinceLastScrapeRun > staleThresholdMinutes,
+    };
     const payload = {
         generatedAt: new Date().toISOString(),
         overview: {
@@ -224,6 +254,7 @@ export async function getStatistic(req, res) {
             conversionRate,
         },
         recentScrapeRuns,
+        pipelineHealth,
         users: usersDetailed,
     };
     statsCache = {

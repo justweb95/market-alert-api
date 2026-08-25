@@ -9,8 +9,44 @@ import { normalizePriceToEur } from '../../helpers/currency.helper.js';
 import { scrapeKpLatest } from '../../features/kpPages/kpPages.scraper.js';
 import { scrapePaLatestCars, scrapePaLatestMotos, scrapePaMotoPartsAndEquipmentBeta, } from '../../features/paPages/paPages.scraper.js';
 import { scrapeFacebookGroupsLatest, scrapeFacebookMarketplaceLatest, } from '../../features/facebookPages/facebookSources.scraper.js';
+import { killKpBrowser } from '../../features/kpPages/kpBrowser.service.js';
+import { markIngestHeartbeat } from '../watchdog.js';
+import { killPaBrowser } from '../../features/paPages/paCloudflare.service.js';
 function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
+}
+// 2026-08-20: skrejperi imaju interne timeout-e na navigaciju (page.goto,
+// waitForSelector), ali NE i na `browser.newContext()`, `context.newPage()`,
+// `page.content()` ni `page.close()`. Ako Chromium proces zaglavi, ti pozivi nikad
+// ne odgovore — ni resolve ni reject. BullMQ ingest worker radi sa concurrency 1 i
+// drzi lock dok je proces ziv, pa takav posao nikad ne postane "stalled": ostaje
+// zauvek active i trajno blokira ceo queue.
+//
+// Tako je produkcija stala 15.08.2026. u 23:45 — 5 dana bez ijednog novog oglasa,
+// dok je maintenance cleanup u medjuvremenu pobrisao i poslednje postojece (starije
+// od 2 dana), pa je Listing tabela pala na 0 i nijedan alert nije mogao da se okine.
+//
+// Zato svaki izvor dobija tvrd zidni-sat limit: posao mora da se zavrsi ili pukne,
+// nikad da visi.
+const SCRAPE_TIMEOUT_MS = Number(process.env.SCRAPE_TIMEOUT_MS ?? 90_000);
+class ScrapeTimeoutError extends Error {
+    constructor(label, ms) {
+        super(`${label} scrape timed out after ${ms}ms`);
+        this.name = 'ScrapeTimeoutError';
+    }
+}
+function withTimeout(label, promise, ms = SCRAPE_TIMEOUT_MS) {
+    // Original ostaje neresen kad timeout pobedi trku; ako kasnije ipak pukne, ne sme
+    // da srusi proces kao unhandled rejection.
+    promise.catch(() => { });
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new ScrapeTimeoutError(label, ms)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timer)
+            clearTimeout(timer);
+    });
 }
 // PA je jedini izvor iza Cloudflare-a (headed Chromium prolazi izazov, ali svaki
 // prolaz je "skup" u smislu bot-fingerprint-a). Da ne bismo gadjali PA na svaki
@@ -130,6 +166,18 @@ async function upsertListingsBySource(source, listings) {
 export const ingestWorker = new Worker('ingest', async (job) => {
     if (job.name !== 'ingest_latest')
         return;
+    // Watchdog heartbeat mora da se javi cim ciklus zavrsi, uspesno ili ne — finally
+    // pokriva i throw put. Ako se OVO nikad ne izvrsi (ciklus visi zauvek na nekom
+    // await-u), watchdog.ts to detektuje i forsira restart procesa. Vidi
+    // docs/DECISIONS.md → 2026-08-20.
+    try {
+        await runIngestCycle(job);
+    }
+    finally {
+        markIngestHeartbeat();
+    }
+}, { connection: redisConnection });
+async function runIngestCycle(job) {
     console.log('[ingest] job', { id: job.id, data: job.data });
     console.log('[ingest] DATABASE_URL', process.env.DATABASE_URL);
     const FAST = process.env.INGEST_FAST === '1';
@@ -151,38 +199,46 @@ export const ingestWorker = new Worker('ingest', async (job) => {
         listings: [],
     };
     try {
-        kp = await scrapeKpLatest({ page: 1, take });
+        kp = await withTimeout('KP', scrapeKpLatest({ page: 1, take }));
         await recordScrapeRun('kp', true, kp.listings.length);
     }
     catch (error) {
         console.error('[ingest] KP scrape failed', error);
+        if (error instanceof ScrapeTimeoutError)
+            killKpBrowser();
         await recordScrapeRun('kp', false, 0, error);
     }
     if (shouldRunPaThisCycle()) {
         try {
-            paCars = await scrapePaLatestCars({ take });
+            paCars = await withTimeout('PA cars', scrapePaLatestCars({ take }));
             await recordScrapeRun('pa-car', true, paCars.listings.length);
         }
         catch (error) {
             console.error('[ingest] PA cars scrape failed', error);
+            if (error instanceof ScrapeTimeoutError)
+                killPaBrowser();
             await recordScrapeRun('pa-car', false, 0, error);
         }
         await jitter(2_000, 8_000);
         try {
-            paMotos = await scrapePaLatestMotos({ take });
+            paMotos = await withTimeout('PA motos', scrapePaLatestMotos({ take }));
             await recordScrapeRun('pa-moto', true, paMotos.listings.length);
         }
         catch (error) {
             console.error('[ingest] PA motos scrape failed', error);
+            if (error instanceof ScrapeTimeoutError)
+                killPaBrowser();
             await recordScrapeRun('pa-moto', false, 0, error);
         }
         await jitter(2_000, 8_000);
         try {
-            paMotoPartsBeta = await scrapePaMotoPartsAndEquipmentBeta({ take });
+            paMotoPartsBeta = await withTimeout('PA moto parts beta', scrapePaMotoPartsAndEquipmentBeta({ take }));
             await recordScrapeRun('pa-moto-parts-beta', true, paMotoPartsBeta.listings.length);
         }
         catch (error) {
             console.error('[ingest] PA moto parts beta scrape failed', error);
+            if (error instanceof ScrapeTimeoutError)
+                killPaBrowser();
             await recordScrapeRun('pa-moto-parts-beta', false, 0, error);
         }
     }
@@ -190,13 +246,13 @@ export const ingestWorker = new Worker('ingest', async (job) => {
         console.log('[ingest] skipping PA this cycle (PA_SCRAPE_INTERVAL_MINUTES not elapsed)');
     }
     try {
-        fbGroups = await scrapeFacebookGroupsLatest({ take });
+        fbGroups = await withTimeout('FB groups', scrapeFacebookGroupsLatest({ take }));
     }
     catch (error) {
         console.error('[ingest] FB groups scrape failed', error);
     }
     try {
-        fbMarketplace = await scrapeFacebookMarketplaceLatest({ take });
+        fbMarketplace = await withTimeout('FB marketplace', scrapeFacebookMarketplaceLatest({ take }));
     }
     catch (error) {
         console.error('[ingest] FB marketplace scrape failed', error);
@@ -256,5 +312,5 @@ export const ingestWorker = new Worker('ingest', async (job) => {
         const after = await prisma.listing.count();
         console.log('[ingest] db after count', after);
     }
-}, { connection: redisConnection });
+}
 //# sourceMappingURL=ingest.worker.js.map

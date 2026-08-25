@@ -40,6 +40,13 @@ type StatisticsResponse = {
     errorMessage: string | null;
     createdAt: Date;
   }>;
+  pipelineHealth: {
+    scrapeIntervalMinutes: number;
+    lastScrapeRunAt: Date | null;
+    lastSuccessfulScrapeAt: Date | null;
+    minutesSinceLastScrapeRun: number | null;
+    isStale: boolean;
+  };
   users: Array<{
     userId: string;
     name: string;
@@ -143,6 +150,8 @@ export async function getStatistic(req: Request, res: Response) {
     totalPaidUsers,
     drugarskiCount,
     recentScrapeRuns,
+    lastScrapeRun,
+    lastSuccessfulScrapeRun,
   ] = await Promise.all([
     prisma.user.count(),
     prisma.device.count(),
@@ -174,6 +183,21 @@ export async function getStatistic(req: Request, res: Response) {
         errorMessage: true,
         createdAt: true,
       },
+    }),
+    // Vreme poslednjeg ScrapeRun reda BILO KOG ishoda (uspeh ili neuspeh) je jedini
+    // pouzdan signal da li je ingest ciklus uopste izvrsen — pojedinacan izvor
+    // (npr. KP) moze da promasi bez ovoga (recordScrapeRun i dalje pise red), ali
+    // ako se CEO ciklus zaglavi (2026-08-20 incident: Chromium proces visio, nijedan
+    // await se nikad nije zavrsio), nijedan red se ne upisuje uopste — sto je tacno
+    // ono sto trazimo da detektujemo.
+    prisma.scrapeRun.findFirst({
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    }),
+    prisma.scrapeRun.findFirst({
+      where: { success: true },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
     }),
   ]);
 
@@ -284,6 +308,22 @@ export async function getStatistic(req: Request, res: Response) {
     };
   });
 
+  // Isti prag koji koristi watchdog (jobs/watchdog.ts) da sam sebe restartuje: 5
+  // propustenih ciklusa. Ovde je informativno, samo za dashboard — watchdog ima
+  // svoju nezavisnu logiku u backend procesu.
+  const scrapeIntervalMinutes = parseInt(process.env.SCRAPE_INTERVAL_MINUTES || "5", 10);
+  const staleThresholdMinutes = scrapeIntervalMinutes * 5;
+  const minutesSinceLastScrapeRun = lastScrapeRun
+    ? Math.floor((Date.now() - lastScrapeRun.createdAt.getTime()) / 60_000)
+    : null;
+  const pipelineHealth: StatisticsResponse["pipelineHealth"] = {
+    scrapeIntervalMinutes,
+    lastScrapeRunAt: lastScrapeRun?.createdAt ?? null,
+    lastSuccessfulScrapeAt: lastSuccessfulScrapeRun?.createdAt ?? null,
+    minutesSinceLastScrapeRun,
+    isStale: minutesSinceLastScrapeRun === null || minutesSinceLastScrapeRun > staleThresholdMinutes,
+  };
+
   const payload: StatisticsResponse = {
     generatedAt: new Date().toISOString(),
     overview: {
@@ -326,6 +366,7 @@ export async function getStatistic(req: Request, res: Response) {
       conversionRate,
     },
     recentScrapeRuns,
+    pipelineHealth,
     users: usersDetailed,
   };
 

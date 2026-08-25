@@ -76,3 +76,17 @@ export async function fetchKpHtml(targetUrl: string): Promise<string> {
     throw err;
   }
 }
+
+// 2026-08-20: kada sam Chromium proces zaglavi (ne baci gresku, samo nikad ne
+// odgovori), zatvaranje samo konteksta ne pomaze — sledeci `browser.newContext()`
+// visi na istom mrtvom procesu i poison-uje svaki naredni ciklus. Ovo baca i
+// kesirani browser, pa sledeci ciklus podize potpuno nov Chromium. Zatvaranje ide
+// fire-and-forget jer i sam close() ume da visi na zaglavljenom procesu.
+export function killKpBrowser(): void {
+  const prevContext = contextPromise;
+  const prevBrowser = browserPromise;
+  contextPromise = null;
+  browserPromise = null;
+  if (prevContext) prevContext.then((ctx) => ctx.close()).catch(() => {});
+  if (prevBrowser) prevBrowser.then((b) => b.close()).catch(() => {});
+}

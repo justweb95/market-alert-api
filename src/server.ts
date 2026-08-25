@@ -14,12 +14,14 @@ import { generalLimiter, scraperJobLimiter } from "./lib/rate-limit.js";
 import { Queue } from "bullmq";
 import { startSchedulers } from "./jobs/scheduler.js";
 import { redisConnection } from "./jobs/redis.js";
+import { startIngestWatchdog } from "./jobs/watchdog.js";
 
 import "./jobs/workers/ingest.worker.js";
 import "./jobs/workers/maintenance.worker.js";
 import "./jobs/workers/notification.worker.js";
 
 await startSchedulers();
+startIngestWatchdog();
 
 const DEBUG_ROUTES_ENABLED = process.env.DEBUG_ROUTES_ENABLED === "1";
 const DEBUG_ROUTES_TOKEN = process.env.DEBUG_ROUTES_TOKEN?.trim();
