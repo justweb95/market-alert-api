@@ -1,4 +1,6 @@
 import { prisma } from "../../db/prisma.js";
+import { REGION_CITIES, REGION_CODES } from "./regions.js";
+import { loosenSearchText, normalizeSearchText } from "../../lib/text.js";
 import { sendExpoPushNotification } from "./expoPush.service.js";
 const MAX_NOTIFICATION_RETRIES = 3;
 function getErrorMessage(error) {
@@ -108,20 +110,25 @@ function buildBatchPushBody(keywords, listings) {
     return `${prefix}. Primeri: ${preview}`;
 }
 function normalizeForMatch(value) {
-    return value
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .trim();
+    // Zajednicka normalizacija: cirilica i latinica (sa ili bez dijakritike)
+    // svode se na isti oblik, pa uparivanje radi u svim kombinacijama pisama.
+    return normalizeSearchText(value);
 }
 function extractRawObject(listing) {
     if (!listing.raw || typeof listing.raw !== "object")
         return {};
     return listing.raw;
 }
+// Normalizacija celog teksta oglasa je najskuplja operacija u uparivanju, a
+// doesMatch() je poziva vise puta za SVAKI par (signal, oglas). Kes je vezan za
+// sam objekat oglasa (WeakMap), pa zivi samo dok traje jedan ciklus uparivanja.
+const listingTextCache = new WeakMap();
 function buildListingText(listing) {
+    const cached = listingTextCache.get(listing);
+    if (cached !== undefined)
+        return cached;
     const raw = extractRawObject(listing);
-    return normalizeForMatch([
+    const text = normalizeForMatch([
         listing.title,
         listing.url,
         listing.locationText ?? "",
@@ -130,6 +137,21 @@ function buildListingText(listing) {
         String(raw.desc ?? ""),
         String(raw.description ?? ""),
     ].join(" "));
+    listingTextCache.set(listing, text);
+    return text;
+}
+/** Naslov u oba oblika (strogi + labavi) - takodje se racuna jednom po oglasu. */
+const listingTitleFormsCache = new WeakMap();
+function getTitleForms(listing) {
+    const cached = listingTitleFormsCache.get(listing);
+    if (cached)
+        return cached;
+    const forms = {
+        strict: normalizeForMatch(listing.title),
+        loose: loosenSearchText(listing.title),
+    };
+    listingTitleFormsCache.set(listing, forms);
+    return forms;
 }
 function getListingPriceEur(listing) {
     // listing.price is already normalized to EUR at ingest time (ingest.worker.ts) -
@@ -223,6 +245,155 @@ function getListingKm(listing) {
         parseKmText(raw.mileageFromOdometer) ??
         parseKmText(listing.title));
 }
+const FUEL_PATTERNS = [
+    {
+        value: "DIZEL",
+        substrings: ["dizel", "diesel"],
+        tokens: ["tdi", "cdi", "hdi", "dci", "jtd", "crdi", "tdci", "cdti", "d4d"],
+    },
+    { value: "TNG", substrings: ["autogas"], tokens: ["tng", "lpg", "gas", "plin"] },
+    { value: "CNG", substrings: ["metan"], tokens: ["cng"] },
+    { value: "HIBRID", substrings: ["hibrid", "hybrid"], tokens: ["hev", "phev", "mhev"] },
+    { value: "ELEKTRO", substrings: ["elektro", "electric", "elektricn"], tokens: ["ev", "bev"] },
+    {
+        value: "BENZIN",
+        substrings: ["benzin", "petrol"],
+        tokens: ["tsi", "tfsi", "fsi", "mpi", "vti", "gti", "thp"],
+    },
+];
+const BODY_PATTERNS = [
+    {
+        value: "SUV",
+        substrings: ["dzip", "jeep", "terenac", "crossover", "krosover"],
+        tokens: ["suv"],
+    },
+    { value: "KARAVAN", substrings: ["karavan", "station wagon"], tokens: ["wagon", "estate", "sw"] },
+    { value: "KOMBI", substrings: ["kombi"], tokens: ["van"] },
+    { value: "HECBEK", substrings: ["hecbek", "hatchback", "hec bek"], tokens: [] },
+    { value: "LIMUZINA", substrings: ["limuzina"], tokens: ["sedan"] },
+    { value: "KUPE", substrings: ["coupe"], tokens: ["kupe"] },
+    { value: "KABRIOLET", substrings: ["kabriolet", "kabrio", "cabrio", "roadster"], tokens: ["spider"] },
+    { value: "MONOVOLUMEN", substrings: ["monovolumen", "minivan", "mini van"], tokens: ["mpv"] },
+    { value: "PIKAP", substrings: ["pickup", "pick up", "pikap"], tokens: [] },
+];
+const MOTO_TYPE_PATTERNS = [
+    { value: "SKUTER", substrings: ["skuter", "scooter", "moped"], tokens: [] },
+    { value: "ATV", substrings: ["quad", "kvad"], tokens: ["atv"] },
+    {
+        value: "ENDURO",
+        substrings: ["enduro", "motocross", "supermoto", "adventure"],
+        tokens: ["cross", "gs"],
+    },
+    { value: "CHOPPER", substrings: ["chopper", "cruiser", "custom", "bobber"], tokens: [] },
+    { value: "TURING", substrings: ["touring", "turing"], tokens: [] },
+    { value: "SPORT", substrings: ["superbike", "supersport"], tokens: ["sport"] },
+    { value: "NAKED", substrings: ["naked"], tokens: ["street"] },
+    { value: "KLASIK", substrings: ["klasik", "classic", "oldtajmer", "oldtimer", "retro"], tokens: [] },
+];
+/** Tekst je vec normalizovan (mala slova, bez dijakritike) kroz normalizeForMatch. */
+function matchPatterns(text, patterns) {
+    const words = new Set(text.split(/[^a-z0-9]+/).filter(Boolean));
+    const found = new Set();
+    for (const pattern of patterns) {
+        if (pattern.substrings.some((needle) => text.includes(needle))) {
+            found.add(pattern.value);
+            continue;
+        }
+        if (pattern.tokens.some((token) => words.has(token))) {
+            found.add(pattern.value);
+        }
+    }
+    return found;
+}
+/** Strukturisan podatak iz raw ima prednost; ako ga nema, gleda se ceo tekst oglasa. */
+function matchListingAttribute(listing, rawKey, patterns) {
+    const raw = extractRawObject(listing);
+    const structured = normalizeForMatch(String(raw[rawKey] ?? ""));
+    if (structured) {
+        const fromStructured = matchPatterns(structured, patterns);
+        if (fromStructured.size > 0)
+            return fromStructured;
+    }
+    return matchPatterns(buildListingText(listing), patterns);
+}
+function getListingFuels(listing) {
+    return matchListingAttribute(listing, "fuel", FUEL_PATTERNS);
+}
+function getListingBodyTypes(listing) {
+    return matchListingAttribute(listing, "bodyType", BODY_PATTERNS);
+}
+function getListingMotoTypes(listing) {
+    return matchListingAttribute(listing, "motoType", MOTO_TYPE_PATTERNS);
+}
+/** Kubikaza motora: "689 cm3", "125 ccm", "1.000 cm3". */
+function parseCcmText(value) {
+    const match = String(value ?? "")
+        .toLowerCase()
+        .match(/([0-9][0-9. ]*) *(cm3|ccm|kubika)/);
+    if (!match || !match[1])
+        return null;
+    const parsed = Number(match[1].replace(/[. ]/g, ""));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+function getListingCcm(listing) {
+    const raw = extractRawObject(listing);
+    return parseCcmText(raw.ccm) ?? parseCcmText(listing.title);
+}
+// Grad iz oglasa -> region Srbije. Duza imena se proveravaju prva ("backa
+// palanka" pre "bac"), a kratka imena moraju da budu cela rec da "ub" ne bi
+// uhvatilo "ljubovija", a "istok" (opstina na KiM) "na istoku grada".
+const MIN_SUBSTRING_CITY_LENGTH = 6;
+const CITY_TO_REGION = REGION_CODES.flatMap((code) => REGION_CITIES[code].map((city) => ({ city, region: code }))).sort((a, b) => b.city.length - a.city.length);
+// Imena gradskih opstina se ponavljaju izmedju gradova ("Stari grad" i
+// "Palilula" postoje i u Beogradu i u Nisu), a duza imena se proveravaju prva -
+// zbog toga bi oglas iz Nisa bio svrstan u Beograd. Ime samog grada zato ima
+// prednost nad imenom opstine.
+const PRIORITY_CITIES = [
+    { city: "beograd", region: "BEOGRAD" },
+    { city: "novi sad", region: "VOJVODINA" },
+    { city: "nis", region: "ISTOCNA" },
+    { city: "kragujevac", region: "ZAPADNA" },
+    { city: "uzice", region: "ZAPADNA" },
+    { city: "krusevac", region: "ZAPADNA" },
+    { city: "leskovac", region: "JUZNA" },
+];
+function cityAppearsIn(city, haystack, words) {
+    if (city.length < MIN_SUBSTRING_CITY_LENGTH)
+        return words.has(city);
+    return haystack.includes(city);
+}
+function getListingRegion(listing) {
+    const location = normalizeForMatch(listing.locationText ?? "");
+    const haystack = location || buildListingText(listing);
+    if (!haystack)
+        return null;
+    const words = new Set(haystack.split(/[^a-z0-9]+/).filter(Boolean));
+    for (const entry of PRIORITY_CITIES) {
+        if (cityAppearsIn(entry.city, haystack, words))
+            return entry.region;
+    }
+    for (const entry of CITY_TO_REGION) {
+        if (cityAppearsIn(entry.city, haystack, words))
+            return entry.region;
+    }
+    return null;
+}
+function regionMatches(listing, regions) {
+    if (regions.length === 0)
+        return true; // cela Srbija
+    const region = getListingRegion(listing);
+    if (!region)
+        return false; // nepoznata lokacija - ne salji dok je filter ukljucen
+    return regions.includes(region);
+}
+function keywordsMatchTitle(listing, keywords) {
+    const { strict: strictTitle, loose: looseTitle } = getTitleForms(listing);
+    return keywords.every((keyword) => {
+        if (strictTitle.includes(normalizeForMatch(keyword)))
+            return true;
+        return looseTitle.includes(loosenSearchText(keyword));
+    });
+}
 function locationMatches(listing, locationText) {
     const target = normalizeForMatch(locationText);
     if (!target)
@@ -250,8 +421,7 @@ function doesMatch(listing, alert) {
     if (normalizedCategory === "SVE") {
         if (alert.keywords.length === 0)
             return false;
-        const titleLower = normalizeForMatch(listing.title);
-        return alert.keywords.every((kw) => titleLower.includes(normalizeForMatch(kw)));
+        return keywordsMatchTitle(listing, alert.keywords);
     }
     const listingKinds = getListingKinds(listing);
     if (normalizedCategory === "AUTOMOBILI" && !listingKinds.has("AUTO_VEHICLE"))
@@ -274,6 +444,9 @@ function doesMatch(listing, alert) {
     if (!locationMatches(listing, alert.locationText)) {
         return false;
     }
+    if (!regionMatches(listing, alert.regions)) {
+        return false;
+    }
     if (alert.yearFrom !== null || alert.yearTo !== null) {
         const year = getListingYear(listing);
         if (year === null)
@@ -292,16 +465,46 @@ function doesMatch(listing, alert) {
         if (alert.kmTo !== null && km > alert.kmTo)
             return false;
     }
+    // Gorivo / karoserija: prazan niz = korisnik nije filtrirao. Ako je filter
+    // ukljucen, a oglas nema prepoznatljiv podatak, oglas se NE salje (isto
+    // ponasanje kao kod godista i kilometraze).
+    if (alert.fuelTypes.length > 0) {
+        const fuels = getListingFuels(listing);
+        if (fuels.size === 0)
+            return false;
+        if (!alert.fuelTypes.some((fuel) => fuels.has(fuel)))
+            return false;
+    }
+    if (alert.bodyTypes.length > 0) {
+        const bodies = getListingBodyTypes(listing);
+        if (bodies.size === 0)
+            return false;
+        if (!alert.bodyTypes.some((body) => bodies.has(body)))
+            return false;
+    }
+    if (alert.motoTypes.length > 0) {
+        const motoTypes = getListingMotoTypes(listing);
+        if (motoTypes.size === 0)
+            return false;
+        if (!alert.motoTypes.some((type) => motoTypes.has(type)))
+            return false;
+    }
+    if (alert.ccmFrom !== null || alert.ccmTo !== null) {
+        const ccm = getListingCcm(listing);
+        if (ccm === null)
+            return false;
+        if (alert.ccmFrom !== null && ccm < alert.ccmFrom)
+            return false;
+        if (alert.ccmTo !== null && ccm > alert.ccmTo)
+            return false;
+    }
     const listingPriceEur = getListingPriceEur(listing);
     // For "SVE" category, matching intentionally relies only on keywords.
     if (normalizedCategory !== "SVE" && alert.priceMax && listingPriceEur != null && listingPriceEur > alert.priceMax) {
         return false;
     }
-    if (alert.keywords.length > 0) {
-        const titleLower = normalizeForMatch(listing.title);
-        const allMatch = alert.keywords.every((kw) => titleLower.includes(normalizeForMatch(kw)));
-        if (!allMatch)
-            return false;
+    if (alert.keywords.length > 0 && !keywordsMatchTitle(listing, alert.keywords)) {
+        return false;
     }
     return true;
 }
@@ -337,6 +540,12 @@ export async function matchAndNotify(listings, options) {
             yearTo: true,
             kmFrom: true,
             kmTo: true,
+            fuelTypes: true,
+            bodyTypes: true,
+            motoTypes: true,
+            regions: true,
+            ccmFrom: true,
+            ccmTo: true,
             isActive: true,
             device: { select: { expoPushToken: true } },
         },
@@ -494,8 +703,16 @@ export async function matchAndNotify(listings, options) {
     }
     console.log(`[matcher] Processed ${notificationsToCreate.length} notifications`);
 }
+/**
+ * Koliko unazad se gleda kad se napravi ili izmeni signal. Bez ogranicenja bi
+ * se cela `Listing` tabela (sa `raw` JSON-om) ucitavala u memoriju pri svakom
+ * kreiranju/izmeni signala, sto raste bez granice kako baza puni.
+ */
+const BACKFILL_LISTING_LIMIT = 500;
 export async function backfillMatchForAlert(alertId) {
     const listings = await prisma.listing.findMany({
+        orderBy: { createdAt: "desc" },
+        take: BACKFILL_LISTING_LIMIT,
         select: {
             id: true,
             source: true,

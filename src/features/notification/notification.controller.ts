@@ -774,7 +774,11 @@ export async function updateAlert(req: Request, res: Response) {
   // sme da menja isti uredjaj ili bilo koji uredjaj povezan sa istim nalogom
   // (isti princip kao getAlerts, koji vraca signale po nalogu).
   const requestDeviceId = getSingleString(req.body?.deviceId);
-  if (requestDeviceId && requestDeviceId !== existing.deviceId) {
+  if (!requestDeviceId) {
+    return res.status(400).json({ error: "Device ID je obavezan" });
+  }
+
+  if (requestDeviceId !== existing.deviceId) {
     const requestDevice = await prisma.device.findUnique({
       where: { id: requestDeviceId },
       select: { id: true, userId: true },

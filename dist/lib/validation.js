@@ -81,11 +81,52 @@ export const createAlertSchema = z.object({
         .int()
         .positive('Kilometraža mora biti pozitivna')
         .nullish(),
+    // Filteri za vozila - prazan niz znaci "nije bitno".
+    fuelTypes: z
+        .array(z.enum(["BENZIN", "DIZEL", "HIBRID", "ELEKTRO", "TNG", "CNG"]))
+        .max(6)
+        .optional(),
+    bodyTypes: z
+        .array(z.enum([
+        "LIMUZINA",
+        "HECBEK",
+        "KARAVAN",
+        "KOMBI",
+        "SUV",
+        "KUPE",
+        "KABRIOLET",
+        "MONOVOLUMEN",
+        "PIKAP",
+    ]))
+        .max(9)
+        .optional(),
+    motoTypes: z
+        .array(z.enum([
+        "NAKED",
+        "SPORT",
+        "CHOPPER",
+        "ENDURO",
+        "SKUTER",
+        "TURING",
+        "ATV",
+        "KLASIK",
+    ]))
+        .max(8)
+        .optional(),
+    regions: z
+        .array(z.enum(["BEOGRAD", "VOJVODINA", "ZAPADNA", "ISTOCNA", "JUZNA", "KOSOVO"]))
+        .max(6)
+        .optional(),
+    ccmFrom: z.number().int().positive('Kubikaža mora biti pozitivna').max(10000).nullish(),
+    ccmTo: z.number().int().positive('Kubikaža mora biti pozitivna').max(10000).nullish(),
     isActive: z.boolean().default(true),
 });
 // Alert Update
-export const updateAlertSchema = createAlertSchema.partial().omit({
-    deviceId: true,
+// Sva ostala polja su opciona - controller zadrzava postojecu vrednost za ono
+// sto klijent ne posalje. deviceId je OBAVEZAN: bez njega controller ne moze da
+// proveri vlasnistvo, pa bi svako ko zna id signala mogao da ga izmeni.
+export const updateAlertSchema = createAlertSchema.partial().extend({
+    deviceId: z.string().min(1, 'Device ID je obavezno polje'),
 });
 // Register User (optional, for future auth)
 export const registerUserSchema = z.object({

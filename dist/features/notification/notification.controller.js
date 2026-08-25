@@ -5,6 +5,7 @@ import { backfillMatchForAlert } from "./matcher.js";
 import { FREE_BRONZE_CODE } from "../../lib/constants.js";
 import { sendVerificationEmail } from "../../lib/email.service.js";
 import { verifyGoogleIdToken } from "../../lib/googleAuth.js";
+import { REGION_CODES } from "./regions.js";
 function hasPaidAccess(subscription) {
     if (!subscription)
         return false;
@@ -23,10 +24,12 @@ const TIER_ALERT_LIMIT = {
     SILVER: 6,
     GOLD: 10,
 };
+// alerts = koliko signala sme istovremeno da bude ukljuceno,
+// drafts = koliko jos sme da stoji sacuvano u rezervi (nacrti/pauzirani).
 const PRICING_PLANS = [
-    { tier: "BRONZE", alerts: 3, monthlyEur: 10 },
-    { tier: "SILVER", alerts: 6, monthlyEur: 15 },
-    { tier: "GOLD", alerts: 10, monthlyEur: 20 },
+    { tier: "BRONZE", alerts: 3, drafts: 3, monthlyEur: 10 },
+    { tier: "SILVER", alerts: 6, drafts: 6, monthlyEur: 15 },
+    { tier: "GOLD", alerts: 10, drafts: 10, monthlyEur: 20 },
 ];
 function normalizePlatform(platform) {
     if (typeof platform !== "string")
@@ -45,6 +48,40 @@ function normalizePlatform(platform) {
 }
 function getSingleString(value) {
     return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+const ALLOWED_FUEL_TYPES = new Set(["BENZIN", "DIZEL", "HIBRID", "ELEKTRO", "TNG", "CNG"]);
+const ALLOWED_REGIONS = new Set(REGION_CODES);
+const ALLOWED_MOTO_TYPES = new Set([
+    "NAKED",
+    "SPORT",
+    "CHOPPER",
+    "ENDURO",
+    "SKUTER",
+    "TURING",
+    "ATV",
+    "KLASIK",
+]);
+const ALLOWED_BODY_TYPES = new Set([
+    "LIMUZINA",
+    "HECBEK",
+    "KARAVAN",
+    "KOMBI",
+    "SUV",
+    "KUPE",
+    "KABRIOLET",
+    "MONOVOLUMEN",
+    "PIKAP",
+]);
+/** Normalizuje listu filtera (gorivo/karoserija): velika slova, bez duplikata,
+ *  samo dozvoljene vrednosti. Prazan niz = bez filtriranja. */
+function getEnumList(value, allowed) {
+    if (!Array.isArray(value))
+        return [];
+    const normalized = value
+        .filter((item) => typeof item === "string")
+        .map((item) => item.trim().toUpperCase())
+        .filter((item) => allowed.has(item));
+    return Array.from(new Set(normalized));
 }
 function getOptionalInt(value) {
     if (value === null || value === undefined || value === "")
@@ -88,6 +125,43 @@ function computeTrialStatus(trialStartedAt) {
         ? Math.ceil((expiredAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
         : 0;
     return { trialActive, trialDaysLeft, trialExpiredAt: expiredAt };
+}
+/**
+ * Limiti signala za jedan uredjaj/nalog.
+ *
+ * maxActive = broj signala koji istovremeno smeju da budu ukljuceni (plan).
+ * maxTotal  = maxActive aktivnih + isto toliko sacuvanih "u rezervi" (pauzirani
+ *             signali / nacrti). Pauziran signal NE zauzima aktivno mesto, pa
+ *             korisnik moze da pauzira jedan i odmah napravi/ukljuci drugi, a
+ *             prethodni ostaje sacuvan u bazi.
+ */
+function resolveAlertLimits(device) {
+    const user = device.user ?? null;
+    const planTier = (user?.planTier ?? "FREE");
+    const isDrugarskiActive = user?.promoCodeUsed === FREE_BRONZE_CODE;
+    const trialStart = user?.trialStartedAt ?? device.trialStartedAt ?? null;
+    const { trialActive } = computeTrialStatus(trialStart);
+    const hasActiveSub = hasPaidAccess(user?.subscription ?? null);
+    const maxActive = isDrugarskiActive
+        ? 5
+        : hasActiveSub
+            ? getTierAlertLimit(planTier)
+            : trialActive
+                ? getTierAlertLimit("BRONZE")
+                : 0;
+    return { maxActive, maxTotal: maxActive * 2 };
+}
+/** Where filter koji hvata sve signale naloga (ili samo uredjaja ako nema naloga). */
+function alertScopeWhere(device) {
+    return device.userId ? { device: { userId: device.userId } } : { deviceId: device.id };
+}
+async function countAlerts(device) {
+    const where = alertScopeWhere(device);
+    const [total, active] = await Promise.all([
+        prisma.alert.count({ where }),
+        prisma.alert.count({ where: { ...where, isActive: true } }),
+    ]);
+    return { total, active };
 }
 async function freeUserDeviceSlot(userId, currentDeviceId) {
     const linkedDevices = await prisma.device.findMany({
@@ -160,9 +234,13 @@ async function buildProfilePayload(deviceId) {
                 ? getTierAlertLimit("BRONZE") // trial = 3 alerts (Bronze)
                 : 0; // locked
     const isLocked = !trialActive && !isDrugarskiActive && !hasActiveSub;
-    const signalCount = user?.id
-        ? await prisma.alert.count({ where: { device: { userId: user.id } } })
-        : await prisma.alert.count({ where: { deviceId } });
+    // signalCount = ukupno sacuvanih signala, activeSignalCount = ukljucenih.
+    // Limit plana se odnosi na aktivne; isto toliko sme da stoji u rezervi
+    // (pauzirani signali / nacrti).
+    const { total: signalCount, active: activeSignalCount } = await countAlerts({
+        id: device.id,
+        userId: device.userId,
+    });
     return {
         deviceId: device.id,
         user: user
@@ -179,7 +257,10 @@ async function buildProfilePayload(deviceId) {
             : null,
         planTier,
         alertLimit: effectiveAlertLimit,
+        draftLimit: effectiveAlertLimit,
+        totalAlertLimit: effectiveAlertLimit * 2,
         signalCount,
+        activeSignalCount,
         pricingPlans: PRICING_PLANS,
         freeBronzeCode: FREE_BRONZE_CODE,
         trialActive,
@@ -266,6 +347,10 @@ export async function registerDevice(req, res) {
                         passwordHash: hashPassword(randomBytes(32).toString("hex")),
                         googleId: identity.googleId,
                         emailVerified: identity.emailVerified,
+                        // Trial krece od trenutka registracije naloga, pa svaki nov korisnik
+                        // dobija pun broj dana (ranije se nasledjivao datum kreiranja Device
+                        // reda, pa je korisnik koji je app otvorio pre par dana dobijao manje).
+                        trialStartedAt: new Date(),
                     },
                 });
                 resolvedUserId = createdUser.id;
@@ -310,6 +395,8 @@ export async function registerDevice(req, res) {
                         passwordHash: hashPassword(password),
                         emailVerifyToken,
                         emailVerifyTokenExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+                        // Trial krece od trenutka registracije naloga (pun broj dana).
+                        trialStartedAt: new Date(),
                     },
                 });
                 resolvedUserId = createdUser.id;
@@ -397,6 +484,12 @@ export async function createAlert(req, res) {
     const yearTo = getOptionalInt(req.body?.yearTo);
     const kmFrom = getOptionalInt(req.body?.kmFrom);
     const kmTo = getOptionalInt(req.body?.kmTo);
+    const fuelTypes = getEnumList(req.body?.fuelTypes, ALLOWED_FUEL_TYPES);
+    const bodyTypes = getEnumList(req.body?.bodyTypes, ALLOWED_BODY_TYPES);
+    const motoTypes = getEnumList(req.body?.motoTypes, ALLOWED_MOTO_TYPES);
+    const ccmFrom = getOptionalInt(req.body?.ccmFrom);
+    const ccmTo = getOptionalInt(req.body?.ccmTo);
+    const regions = getEnumList(req.body?.regions, ALLOWED_REGIONS);
     const normalizedCategory = category?.toUpperCase() ?? null;
     const isAllCategory = normalizedCategory === "SVE";
     const allowedPropertyTypes = new Set(["STAN", "LOKAL", "PARCELA"]);
@@ -424,6 +517,9 @@ export async function createAlert(req, res) {
     }
     if (kmFrom !== null && kmTo !== null && kmFrom > kmTo) {
         return res.status(400).json({ error: "Kilometraza od ne moze biti veca od kilometraze do" });
+    }
+    if (ccmFrom !== null && ccmTo !== null && ccmFrom > ccmTo) {
+        return res.status(400).json({ error: "Kubikaza od ne moze biti veca od kubikaze do" });
     }
     const device = await prisma.device.findUnique({
         where: { id: deviceId },
@@ -454,31 +550,24 @@ export async function createAlert(req, res) {
     if (!device) {
         return res.status(404).json({ error: "Uredjaj nije pronadjen" });
     }
-    const user = device.user ?? null;
-    const planTier = (user?.planTier ?? "FREE");
-    const isDrugarskiActive = user?.promoCodeUsed === FREE_BRONZE_CODE;
-    const deviceTrialStartedAt = device.trialStartedAt ?? null;
-    const trialStart = user?.trialStartedAt ?? deviceTrialStartedAt;
-    const { trialActive } = computeTrialStatus(trialStart);
-    const hasActiveSub = hasPaidAccess(user?.subscription ?? null);
-    const maxAlerts = isDrugarskiActive
-        ? 5
-        : hasActiveSub
-            ? getTierAlertLimit(planTier)
-            : trialActive
-                ? getTierAlertLimit("BRONZE")
-                : 0;
-    if (maxAlerts === 0) {
+    const { maxActive, maxTotal } = resolveAlertLimits(device);
+    if (maxActive === 0) {
         return res.status(403).json({
             error: "Probni period je istekao. Kupi plan ili unesi promo kod.",
         });
     }
-    const count = device.userId
-        ? await prisma.alert.count({ where: { device: { userId: device.userId } } })
-        : await prisma.alert.count({ where: { deviceId } });
-    if (count >= maxAlerts) {
+    // Signal se po defaultu pravi aktivan; klijent moze da posalje isActive:false
+    // da bi ga sacuvao kao nacrt (rezervu) i kad su sva aktivna mesta zauzeta.
+    const wantsActive = req.body?.isActive !== false;
+    const { total: alertCount, active: activeCount } = await countAlerts(device);
+    if (alertCount >= maxTotal) {
         return res.status(400).json({
-            error: `Dostignut maksimalan broj signala (${maxAlerts}) za tvoj plan.`,
+            error: `Dostignut maksimalan broj signala (${maxActive} aktivnih + ${maxActive} u rezervi) za tvoj plan.`,
+        });
+    }
+    if (wantsActive && activeCount >= maxActive) {
+        return res.status(400).json({
+            error: `Dostignut limit aktivnih signala (${maxActive}). Pauziraj neki postojeci signal ili sacuvaj ovaj kao nacrt.`,
         });
     }
     const alert = await prisma.alert.create({
@@ -493,6 +582,13 @@ export async function createAlert(req, res) {
             yearTo,
             kmFrom,
             kmTo,
+            fuelTypes,
+            bodyTypes,
+            motoTypes,
+            regions,
+            ccmFrom,
+            ccmTo,
+            isActive: wantsActive,
         },
     });
     res.status(201).json(alert);
@@ -526,15 +622,188 @@ export async function getAlerts(req, res) {
     });
     return res.status(200).json(alerts);
 }
+// PATCH /api/notifications/alerts/:id
+// Izmena postojeceg signala. Namerno NE dira isActive (pauziran signal ostaje
+// pauziran posle izmene) i NE proverava limit plana - broj signala se izmenom
+// ne menja, pa korisnik moze da izmeni signal i kad je na maksimumu.
+export async function updateAlert(req, res) {
+    const id = getSingleString(req.params.id);
+    if (!id) {
+        return res.status(400).json({ error: "Alert ID je obavezan" });
+    }
+    const existing = await prisma.alert.findUnique({
+        where: { id },
+        include: { device: { select: { id: true, userId: true } } },
+    });
+    if (!existing) {
+        return res.status(404).json({ error: "Signal nije pronadjen" });
+    }
+    // Provera vlasnistva: klijent salje deviceId sa kojeg menja signal. Signal
+    // sme da menja isti uredjaj ili bilo koji uredjaj povezan sa istim nalogom
+    // (isti princip kao getAlerts, koji vraca signale po nalogu).
+    const requestDeviceId = getSingleString(req.body?.deviceId);
+    if (!requestDeviceId) {
+        return res.status(400).json({ error: "Device ID je obavezan" });
+    }
+    if (requestDeviceId !== existing.deviceId) {
+        const requestDevice = await prisma.device.findUnique({
+            where: { id: requestDeviceId },
+            select: { id: true, userId: true },
+        });
+        const sameUser = !!requestDevice?.userId && requestDevice.userId === existing.device.userId;
+        if (!sameUser) {
+            return res.status(403).json({ error: "Signal ne pripada ovom uredjaju" });
+        }
+    }
+    // Polja koja klijent nije poslao zadrzavaju postojecu vrednost.
+    const hasField = (key) => Object.prototype.hasOwnProperty.call(req.body ?? {}, key) &&
+        req.body[key] !== undefined;
+    const categoryInput = getSingleString(req.body?.category)?.toUpperCase() ?? null;
+    const normalizedCategory = categoryInput ?? existing.category;
+    const isAllCategory = normalizedCategory === "SVE";
+    const rawKeywords = Array.isArray(req.body?.keywords) ? req.body.keywords : null;
+    const keywords = rawKeywords
+        ? rawKeywords.filter((keyword) => typeof keyword === "string" && keyword.trim().length > 0)
+        : existing.keywords;
+    let priceMax = existing.priceMax;
+    if (hasField("priceMax")) {
+        const rawPriceMax = Number(req.body?.priceMax);
+        priceMax = Number.isFinite(rawPriceMax) ? Math.round(rawPriceMax) : null;
+    }
+    const locationText = hasField("locationText")
+        ? getSingleString(req.body?.locationText) ?? ""
+        : existing.locationText;
+    const allowedPropertyTypes = new Set(["STAN", "LOKAL", "PARCELA"]);
+    let propertyType = existing.propertyType;
+    if (hasField("propertyType")) {
+        const propertyTypeInput = getSingleString(req.body?.propertyType)?.toUpperCase() ?? null;
+        propertyType =
+            propertyTypeInput && allowedPropertyTypes.has(propertyTypeInput)
+                ? propertyTypeInput
+                : null;
+    }
+    const yearFrom = hasField("yearFrom") ? getOptionalInt(req.body?.yearFrom) : existing.yearFrom;
+    const yearTo = hasField("yearTo") ? getOptionalInt(req.body?.yearTo) : existing.yearTo;
+    const kmFrom = hasField("kmFrom") ? getOptionalInt(req.body?.kmFrom) : existing.kmFrom;
+    const kmTo = hasField("kmTo") ? getOptionalInt(req.body?.kmTo) : existing.kmTo;
+    const fuelTypes = hasField("fuelTypes")
+        ? getEnumList(req.body?.fuelTypes, ALLOWED_FUEL_TYPES)
+        : existing.fuelTypes;
+    const bodyTypes = hasField("bodyTypes")
+        ? getEnumList(req.body?.bodyTypes, ALLOWED_BODY_TYPES)
+        : existing.bodyTypes;
+    const motoTypes = hasField("motoTypes")
+        ? getEnumList(req.body?.motoTypes, ALLOWED_MOTO_TYPES)
+        : existing.motoTypes;
+    const ccmFrom = hasField("ccmFrom") ? getOptionalInt(req.body?.ccmFrom) : existing.ccmFrom;
+    const ccmTo = hasField("ccmTo") ? getOptionalInt(req.body?.ccmTo) : existing.ccmTo;
+    const regions = hasField("regions")
+        ? getEnumList(req.body?.regions, ALLOWED_REGIONS)
+        : existing.regions;
+    // Ista pravila validacije kao kod kreiranja signala.
+    if (!isAllCategory && (!priceMax || priceMax <= 0)) {
+        return res.status(400).json({ error: "priceMax je obavezan i mora biti veci od 0" });
+    }
+    if (isAllCategory && keywords.length === 0) {
+        return res.status(400).json({ error: "Za kategoriju SVE potrebno je uneti kljucne reci" });
+    }
+    if (normalizedCategory === "NEKRETNINE" && !propertyType) {
+        return res.status(400).json({
+            error: "Za nekretnine je obavezno izabrati tip: stan, lokal ili parcela/zemljiste",
+        });
+    }
+    if (yearFrom !== null && yearTo !== null && yearFrom > yearTo) {
+        return res.status(400).json({ error: "Godiste od ne moze biti vece od godista do" });
+    }
+    if (kmFrom !== null && kmTo !== null && kmFrom > kmTo) {
+        return res.status(400).json({ error: "Kilometraza od ne moze biti veca od kilometraze do" });
+    }
+    if (ccmFrom !== null && ccmTo !== null && ccmFrom > ccmTo) {
+        return res.status(400).json({ error: "Kubikaza od ne moze biti veca od kubikaze do" });
+    }
+    const updated = await prisma.alert.update({
+        where: { id },
+        data: {
+            category: normalizedCategory,
+            keywords,
+            priceMax: isAllCategory ? 0 : priceMax,
+            locationText: locationText ?? "",
+            propertyType: normalizedCategory === "NEKRETNINE" ? propertyType : null,
+            yearFrom,
+            yearTo,
+            kmFrom,
+            kmTo,
+            fuelTypes,
+            bodyTypes,
+            motoTypes,
+            regions,
+            ccmFrom,
+            ccmTo,
+        },
+    });
+    res.status(200).json(updated);
+    // Novi kriterijumi -> ponovo prodji kroz vec skinute oglase (NotificationLog
+    // ima unique(alertId, listingId), pa nema duplih notifikacija).
+    backfillMatchForAlert(updated.id).catch((error) => {
+        console.error("[notification] Backfill match failed for alert", updated.id, error);
+    });
+    return;
+}
 // PATCH /api/notifications/alerts/:id/toggle
 export async function toggleAlert(req, res) {
     const id = getSingleString(req.params.id);
     if (!id) {
         return res.status(400).json({ error: "Alert ID je obavezan" });
     }
-    const alert = await prisma.alert.findUnique({ where: { id } });
+    const alert = await prisma.alert.findUnique({
+        where: { id },
+        include: {
+            device: {
+                select: {
+                    id: true,
+                    userId: true,
+                    trialStartedAt: true,
+                    user: {
+                        select: {
+                            planTier: true,
+                            promoCodeUsed: true,
+                            trialStartedAt: true,
+                            subscription: {
+                                select: {
+                                    tier: true,
+                                    status: true,
+                                    productId: true,
+                                    startedAt: true,
+                                    renewsAt: true,
+                                    pausedAt: true,
+                                    cancelledAt: true,
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    });
     if (!alert)
         return res.status(404).json({ error: "Alert nije pronadjen" });
+    // Pauziranje je uvek dozvoljeno. Ukljucivanje sme samo ako ima slobodnog
+    // aktivnog mesta - inace bi korisnik mogao da zaobidje limit plana tako sto
+    // napravi signale kao nacrte pa ih sve ukljuci.
+    if (!alert.isActive) {
+        const { maxActive } = resolveAlertLimits(alert.device);
+        if (maxActive === 0) {
+            return res.status(403).json({
+                error: "Probni period je istekao. Kupi plan ili unesi promo kod.",
+            });
+        }
+        const { active } = await countAlerts(alert.device);
+        if (active >= maxActive) {
+            return res.status(400).json({
+                error: `Dostignut limit aktivnih signala (${maxActive}). Pauziraj drugi signal pa ukljuci ovaj.`,
+            });
+        }
+    }
     const updated = await prisma.alert.update({
         where: { id },
         data: { isActive: !alert.isActive },
@@ -729,14 +998,14 @@ export async function updateProfile(req, res) {
             userId = linked.userId;
         }
         else {
-            // New user: inherit the device's trialStartedAt so reinstall doesn't reset trial
+            // Nov nalog = pun trial od trenutka registracije (isto kao na /devices ruti).
             const created = await prisma.user.create({
                 data: {
                     firstName,
                     lastName,
                     email: normalizedEmail,
                     passwordHash: hashPassword(password),
-                    trialStartedAt: (device.trialStartedAt ?? new Date()),
+                    trialStartedAt: new Date(),
                 },
             });
             const linked = await prisma.device.update({

@@ -131,10 +131,12 @@ export const createAlertSchema = z.object({
 });
 
 // Alert Update
-// Sva polja su opciona - controller zadrzava postojecu vrednost za ono sto
-// klijent ne posalje. deviceId ostaje (opciono) da bi controller mogao da
-// proveri vlasnistvo nad signalom.
-export const updateAlertSchema = createAlertSchema.partial();
+// Sva ostala polja su opciona - controller zadrzava postojecu vrednost za ono
+// sto klijent ne posalje. deviceId je OBAVEZAN: bez njega controller ne moze da
+// proveri vlasnistvo, pa bi svako ko zna id signala mogao da ga izmeni.
+export const updateAlertSchema = createAlertSchema.partial().extend({
+  deviceId: z.string().min(1, 'Device ID je obavezno polje'),
+});
 
 // Register User (optional, for future auth)
 export const registerUserSchema = z.object({

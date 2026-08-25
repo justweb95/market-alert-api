@@ -194,9 +194,17 @@ function extractRawObject(listing: ListingRow): Record<string, unknown> {
   return listing.raw as Record<string, unknown>;
 }
 
+// Normalizacija celog teksta oglasa je najskuplja operacija u uparivanju, a
+// doesMatch() je poziva vise puta za SVAKI par (signal, oglas). Kes je vezan za
+// sam objekat oglasa (WeakMap), pa zivi samo dok traje jedan ciklus uparivanja.
+const listingTextCache = new WeakMap<ListingRow, string>();
+
 function buildListingText(listing: ListingRow): string {
+  const cached = listingTextCache.get(listing);
+  if (cached !== undefined) return cached;
+
   const raw = extractRawObject(listing);
-  return normalizeForMatch([
+  const text = normalizeForMatch([
     listing.title,
     listing.url,
     listing.locationText ?? "",
@@ -205,6 +213,25 @@ function buildListingText(listing: ListingRow): string {
     String(raw.desc ?? ""),
     String(raw.description ?? ""),
   ].join(" "));
+
+  listingTextCache.set(listing, text);
+  return text;
+}
+
+/** Naslov u oba oblika (strogi + labavi) - takodje se racuna jednom po oglasu. */
+const listingTitleFormsCache = new WeakMap<ListingRow, { strict: string; loose: string }>();
+
+function getTitleForms(listing: ListingRow): { strict: string; loose: string } {
+  const cached = listingTitleFormsCache.get(listing);
+  if (cached) return cached;
+
+  const forms = {
+    strict: normalizeForMatch(listing.title),
+    loose: loosenSearchText(listing.title),
+  };
+
+  listingTitleFormsCache.set(listing, forms);
+  return forms;
 }
 
 function getListingPriceEur(listing: ListingRow): number | null {
@@ -431,11 +458,32 @@ function getListingCcm(listing: ListingRow): number | null {
 }
 
 // Grad iz oglasa -> region Srbije. Duza imena se proveravaju prva ("backa
-// palanka" pre "bac"), a imena kraca od 5 slova moraju da budu cela rec da
-// "ub" ne bi uhvatilo "ljubovija".
+// palanka" pre "bac"), a kratka imena moraju da budu cela rec da "ub" ne bi
+// uhvatilo "ljubovija", a "istok" (opstina na KiM) "na istoku grada".
+const MIN_SUBSTRING_CITY_LENGTH = 6;
+
 const CITY_TO_REGION: { city: string; region: RegionCode }[] = REGION_CODES.flatMap((code) =>
   REGION_CITIES[code].map((city) => ({ city, region: code })),
 ).sort((a, b) => b.city.length - a.city.length);
+
+// Imena gradskih opstina se ponavljaju izmedju gradova ("Stari grad" i
+// "Palilula" postoje i u Beogradu i u Nisu), a duza imena se proveravaju prva -
+// zbog toga bi oglas iz Nisa bio svrstan u Beograd. Ime samog grada zato ima
+// prednost nad imenom opstine.
+const PRIORITY_CITIES: { city: string; region: RegionCode }[] = [
+  { city: "beograd", region: "BEOGRAD" },
+  { city: "novi sad", region: "VOJVODINA" },
+  { city: "nis", region: "ISTOCNA" },
+  { city: "kragujevac", region: "ZAPADNA" },
+  { city: "uzice", region: "ZAPADNA" },
+  { city: "krusevac", region: "ZAPADNA" },
+  { city: "leskovac", region: "JUZNA" },
+];
+
+function cityAppearsIn(city: string, haystack: string, words: Set<string>): boolean {
+  if (city.length < MIN_SUBSTRING_CITY_LENGTH) return words.has(city);
+  return haystack.includes(city);
+}
 
 function getListingRegion(listing: ListingRow): RegionCode | null {
   const location = normalizeForMatch(listing.locationText ?? "");
@@ -444,12 +492,12 @@ function getListingRegion(listing: ListingRow): RegionCode | null {
 
   const words = new Set(haystack.split(/[^a-z0-9]+/).filter(Boolean));
 
+  for (const entry of PRIORITY_CITIES) {
+    if (cityAppearsIn(entry.city, haystack, words)) return entry.region;
+  }
+
   for (const entry of CITY_TO_REGION) {
-    if (entry.city.length < 5) {
-      if (words.has(entry.city)) return entry.region;
-      continue;
-    }
-    if (haystack.includes(entry.city)) return entry.region;
+    if (cityAppearsIn(entry.city, haystack, words)) return entry.region;
   }
 
   return null;
@@ -462,9 +510,8 @@ function regionMatches(listing: ListingRow, regions: string[]): boolean {
   return regions.includes(region);
 }
 
-function keywordsMatchTitle(title: string, keywords: string[]): boolean {
-  const strictTitle = normalizeForMatch(title);
-  const looseTitle = loosenSearchText(title);
+function keywordsMatchTitle(listing: ListingRow, keywords: string[]): boolean {
+  const { strict: strictTitle, loose: looseTitle } = getTitleForms(listing);
 
   return keywords.every((keyword) => {
     if (strictTitle.includes(normalizeForMatch(keyword))) return true;
@@ -499,7 +546,7 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
 
   if (normalizedCategory === "SVE") {
     if (alert.keywords.length === 0) return false;
-    return keywordsMatchTitle(listing.title, alert.keywords);
+    return keywordsMatchTitle(listing, alert.keywords);
   }
 
   const listingKinds = getListingKinds(listing);
@@ -572,7 +619,7 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
     return false;
   }
 
-  if (alert.keywords.length > 0 && !keywordsMatchTitle(listing.title, alert.keywords)) {
+  if (alert.keywords.length > 0 && !keywordsMatchTitle(listing, alert.keywords)) {
     return false;
   }
 
@@ -832,8 +879,17 @@ export async function matchAndNotify(
   console.log(`[matcher] Processed ${notificationsToCreate.length} notifications`);
 }
 
+/**
+ * Koliko unazad se gleda kad se napravi ili izmeni signal. Bez ogranicenja bi
+ * se cela `Listing` tabela (sa `raw` JSON-om) ucitavala u memoriju pri svakom
+ * kreiranju/izmeni signala, sto raste bez granice kako baza puni.
+ */
+const BACKFILL_LISTING_LIMIT = 500;
+
 export async function backfillMatchForAlert(alertId: string): Promise<void> {
   const listings = await prisma.listing.findMany({
+    orderBy: { createdAt: "desc" },
+    take: BACKFILL_LISTING_LIMIT,
     select: {
       id: true,
       source: true,
