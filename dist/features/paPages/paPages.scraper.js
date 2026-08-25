@@ -58,6 +58,7 @@ export async function scrapePaLatestCars(opts) {
                 model: '',
                 year: detail?.[1] ?? '',
                 fuel: detail?.[3]?.trim() ?? '',
+                bodyType: detail?.[2]?.trim() ?? '',
                 km: detail?.[5] ?? '',
                 priceEur: parsed.priceEur,
                 city: detail?.[6]?.trim() ?? lastCsvSegment(parsed.rest),
