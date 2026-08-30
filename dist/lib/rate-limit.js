@@ -6,7 +6,7 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 export const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 100, // limit each IP to 100 requests per windowMs
-    message: 'Previše zahteva, pokušajte kasnije',
+    message: { error: 'Previše zahteva, pokušajte kasnije' },
     standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
     legacyHeaders: false, // Disable `X-RateLimit-*` headers
     skip: (req) => {
@@ -17,18 +17,31 @@ export const generalLimiter = rateLimit({
     },
 });
 /**
- * Strict rate limiter for device registration
- * 5 registrations per hour per IP (prevents abuse)
+ * Limiter za POST /devices.
+ *
+ * VAZNO: ova ruta ne opsluzuje samo registraciju naloga - kroz nju idu i prijava
+ * (email+password), Google prijava i anonimna registracija uredjaja pri svakoj
+ * promeni push tokena. Zato je granica bila pogresno postavljena: 5 na sat je
+ * znacilo da korisnik koji nekoliko puta pogresi lozinku vise ne moze da se
+ * prijavi ni sa TACNOM lozinkom narednih sat vremena, a app je to prikazivao kao
+ * gresku u kredencijalima.
+ *
+ * Kljuc: deviceId kad postoji, inace expoPushToken (jedinstven po instalaciji),
+ * pa tek onda IP. Kljucanje po IP-u je losa poslednja opcija za mobilnu app -
+ * mobilni operateri drze hiljade korisnika iza istog CGNAT IP-a, pa bi jedan
+ * korisnik zakljucao sve ostale na toj mrezi. Ukupan obim po IP-u i dalje ogranicava
+ * generalLimiter (100 zahteva / 15 min).
  */
 export const deviceRegistrationLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 5, // 5 registrations per hour
-    message: 'Previše pokušaja registracije, pokušajte kasnije',
+    windowMs: 60 * 60 * 1000, // 1 sat
+    max: 30,
+    message: { error: 'Previše pokušaja prijave. Sačekaj malo pa probaj ponovo.' },
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => {
-        // Rate limit by device ID if available, otherwise by IP
-        return req.body?.deviceId || ipKeyGenerator(req.ip || 'unknown');
+        const deviceId = req.body?.deviceId;
+        const pushToken = req.body?.expoPushToken;
+        return deviceId || pushToken || ipKeyGenerator(req.ip || 'unknown');
     },
 });
 /**
@@ -38,7 +51,7 @@ export const deviceRegistrationLimiter = rateLimit({
 export const createAlertLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 minute
     max: 10, // 10 alerts per minute
-    message: 'Previše signala, pokušajte kasnije',
+    message: { error: 'Previše signala, pokušajte kasnije' },
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => {
@@ -53,7 +66,7 @@ export const createAlertLimiter = rateLimit({
 export const promoCodLimiter = rateLimit({
     windowMs: 60 * 60 * 1000, // 1 hour
     max: 3, // 3 attempts per hour
-    message: 'Previše pokušaja, pokušajte kasnije',
+    message: { error: 'Previše pokušaja, pokušajte kasnije' },
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => {
@@ -67,7 +80,7 @@ export const promoCodLimiter = rateLimit({
 export const scraperJobLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 minute
     max: 5,
-    message: 'Previše pokušaja pokretanja scraper-a',
+    message: { error: 'Previše pokušaja pokretanja scraper-a' },
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => {
@@ -88,7 +101,7 @@ export const scraperJobLimiter = rateLimit({
 export const testNotificationLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: 5,
-    message: 'Previše test notifikacija, pokušajte kasnije',
+    message: { error: 'Previše test notifikacija, pokušajte kasnije' },
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => {
@@ -102,7 +115,7 @@ export const testNotificationLimiter = rateLimit({
 export const statisticLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: 30,
-    message: 'Previše statistic zahteva, pokušajte kasnije',
+    message: { error: 'Previše statistic zahteva, pokušajte kasnije' },
     standardHeaders: true,
     legacyHeaders: false,
 });

@@ -389,6 +389,16 @@ export async function registerDevice(req, res) {
                 where: { email: normalizedEmail },
             });
             if (existingUser) {
+                // Registracija na postojeci email: klijent salje ime i prezime samo iz
+                // "Registruj se" moda (login mod salje prazne stringove). Ranije je ovo
+                // tiho padalo u login granu, pa je korisnik mislio da je napravio nov
+                // nalog iako se samo prijavio na stari - a sa drugom lozinkom je dobijao
+                // "Pogresan email ili password" na ekranu za REGISTRACIJU, sto nema smisla.
+                if (firstName && lastName) {
+                    return res.status(409).json({
+                        error: "Nalog sa ovim emailom vec postoji. Prijavi se umesto registracije.",
+                    });
+                }
                 if (!verifyPassword(password, existingUser.passwordHash)) {
                     return res.status(401).json({ error: "Pogresan email ili password" });
                 }
