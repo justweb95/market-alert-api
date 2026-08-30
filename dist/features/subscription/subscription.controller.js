@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { prisma } from "../../db/prisma.js";
 // Product ID → PlanTier mapping — must match what you configure in App Store / Play Store / RevenueCat dashboard
 const PRODUCT_TIER = {
@@ -20,16 +21,52 @@ const EXPIRATION_EVENTS = new Set([
 ]);
 // RevenueCat event types for pause (Android only via Google Play)
 const PAUSE_EVENTS = new Set(["SUBSCRIPTION_PAUSED"]);
+/**
+ * Google Play ume da posalje product_id kao "subscriptionId:basePlanId"
+ * (npr. "market_monitor_bronze_monthly:monthly"), pa stroga jednakost promasi.
+ * Vraca null kad se proizvod ne prepozna - pozivalac tada NE dira tier, jer bi
+ * tiho spustanje na FREE oduzelo pristup korisniku koji je platio.
+ */
+function resolveTier(productId) {
+    if (!productId)
+        return null;
+    const direct = PRODUCT_TIER[productId];
+    if (direct)
+        return direct;
+    const base = productId.split(":")[0];
+    if (base && PRODUCT_TIER[base])
+        return PRODUCT_TIER[base];
+    const prefixed = Object.keys(PRODUCT_TIER).find((key) => productId.startsWith(key));
+    return prefixed ? PRODUCT_TIER[prefixed] ?? null : null;
+}
+/** Poredjenje deljene tajne otporno na merenje vremena odgovora. */
+function secretMatches(provided, expected) {
+    if (typeof provided !== "string")
+        return false;
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length)
+        return false;
+    return timingSafeEqual(a, b);
+}
 // POST /api/subscription/webhook
 export async function handleRevenueCatWebhook(req, res) {
-    // Validate shared secret header set in RevenueCat dashboard → Project → Integrations → Webhooks
+    // Deljena tajna se podesava u RevenueCat dashboard-u → Project → Integrations →
+    // Webhooks i stize u "Authorization" header-u.
+    //
+    // FAIL-CLOSED: ako tajna nije podesena, webhook se ODBIJA. Ranije se u tom
+    // slucaju propustao svaki zahtev, pa je bilo ko sa poznatim app_user_id-jem
+    // mogao sebi da dodeli GOLD. Bolje je da se pretplate privremeno ne sinhronizuju
+    // (RevenueCat ponavlja isporuku) nego da entitlement bude otvoren.
     const secret = process.env.REVENUECAT_WEBHOOK_SECRET;
-    if (secret) {
-        const provided = req.headers["authorization"];
-        if (provided !== secret) {
-            console.warn("[subscription] Webhook auth failed");
-            return res.status(401).json({ error: "Unauthorized" });
-        }
+    if (!secret) {
+        console.error("[subscription] REVENUECAT_WEBHOOK_SECRET nije podesen - webhook je odbijen. " +
+            "Postavi istu vrednost u .env i u RevenueCat dashboard-u.");
+        return res.status(503).json({ error: "Webhook nije konfigurisan" });
+    }
+    if (!secretMatches(req.headers["authorization"], secret)) {
+        console.warn("[subscription] Webhook auth failed");
+        return res.status(401).json({ error: "Unauthorized" });
     }
     const body = req.body;
     const event = body?.event;
@@ -49,7 +86,16 @@ export async function handleRevenueCatWebhook(req, res) {
         console.warn(`[subscription] User not found for RC id: ${appUserId}`);
         return res.status(200).json({ ok: true, note: "User not found, ignored" });
     }
-    const newTier = PRODUCT_TIER[productId] ?? "FREE";
+    const resolvedTier = resolveTier(productId);
+    // Nepoznat proizvod na aktivnom dogadjaju: ne diramo tier. Ranije je padao na
+    // "FREE", pa bi korisnik koji je upravo platio ostao bez pristupa ako se
+    // product ID u Play-u i PRODUCT_TIER mapi razidju.
+    if (ACTIVE_EVENTS.has(event.type) && !resolvedTier) {
+        console.error(`[subscription] Nepoznat product_id "${productId}" na dogadjaju ${event.type} - ` +
+            "tier nije promenjen. Uskladi PRODUCT_TIER sa Play Console-om.");
+        return res.status(200).json({ ok: true, note: "Unknown product, tier unchanged" });
+    }
+    const newTier = resolvedTier ?? "FREE";
     if (ACTIVE_EVENTS.has(event.type)) {
         // Upsert an active subscription record and upgrade user tier
         await prisma.$transaction([

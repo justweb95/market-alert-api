@@ -1,4 +1,5 @@
 import { prisma } from "../../db/prisma.js";
+import { distanceKm, getCityCoord } from "./cities.js";
 import { REGION_CITIES, REGION_CODES, type RegionCode } from "./regions.js";
 import { loosenSearchText, normalizeSearchText } from "../../lib/text.js";
 import { sendExpoPushNotification } from "./expoPush.service.js";
@@ -21,6 +22,8 @@ type AlertWithDevice = {
   bodyTypes: string[];
   motoTypes: string[];
   regions: string[];
+  cities: string[];
+  radiusKm: number | null;
   ccmFrom: number | null;
   ccmTo: number | null;
   isActive: boolean;
@@ -152,9 +155,9 @@ async function sendAndPersistNotification(input: {
 }
 
 function buildBatchPushTitle(count: number): string {
-  if (count === 1) return "[NOVO] 1 novi oglas";
-  if (count >= 2 && count <= 4) return `[NOVO] ${count} nova oglasa`;
-  return `[NOVO] ${count} novih oglasa`;
+  if (count === 1) return "1 novi oglas";
+  if (count >= 2 && count <= 4) return `${count} nova oglasa`;
+  return `${count} novih oglasa`;
 }
 
 function buildBatchPushBody(
@@ -485,7 +488,8 @@ function cityAppearsIn(city: string, haystack: string, words: Set<string>): bool
   return haystack.includes(city);
 }
 
-function getListingRegion(listing: ListingRow): RegionCode | null {
+/** Grad iz oglasa (normalizovan naziv) + region kom pripada. */
+function getListingCity(listing: ListingRow): { city: string; region: RegionCode } | null {
   const location = normalizeForMatch(listing.locationText ?? "");
   const haystack = location || buildListingText(listing);
   if (!haystack) return null;
@@ -493,11 +497,11 @@ function getListingRegion(listing: ListingRow): RegionCode | null {
   const words = new Set(haystack.split(/[^a-z0-9]+/).filter(Boolean));
 
   for (const entry of PRIORITY_CITIES) {
-    if (cityAppearsIn(entry.city, haystack, words)) return entry.region;
+    if (cityAppearsIn(entry.city, haystack, words)) return entry;
   }
 
   for (const entry of CITY_TO_REGION) {
-    if (cityAppearsIn(entry.city, haystack, words)) return entry.region;
+    if (cityAppearsIn(entry.city, haystack, words)) return entry;
   }
 
   return null;
@@ -505,9 +509,34 @@ function getListingRegion(listing: ListingRow): RegionCode | null {
 
 function regionMatches(listing: ListingRow, regions: string[]): boolean {
   if (regions.length === 0) return true; // cela Srbija
-  const region = getListingRegion(listing);
-  if (!region) return false; // nepoznata lokacija - ne salji dok je filter ukljucen
-  return regions.includes(region);
+  const match = getListingCity(listing);
+  if (!match) return false; // nepoznata lokacija - ne salji dok je filter ukljucen
+  return regions.includes(match.region);
+}
+
+/**
+ * Izbor lokacije "grad + precnik": oglas prolazi ako je njegov grad jedan od
+ * izabranih ili je unutar radiusKm od nekog izabranog grada. Prazan izbor =
+ * cela Srbija; nepoznata lokacija se ne salje dok je filter ukljucen (isto
+ * ponasanje kao kod regiona).
+ */
+function cityRadiusMatches(listing: ListingRow, cities: string[], radiusKm: number | null): boolean {
+  if (cities.length === 0) return true;
+
+  const match = getListingCity(listing);
+  if (!match) return false;
+  if (cities.includes(match.city)) return true;
+
+  const radius = radiusKm ?? 0;
+  if (radius <= 0) return false;
+
+  const listingCoord = getCityCoord(match.city);
+  if (!listingCoord) return false;
+
+  return cities.some((code) => {
+    const target = getCityCoord(code);
+    return target !== null && distanceKm(listingCoord, target) <= radius;
+  });
 }
 
 function keywordsMatchTitle(listing: ListingRow, keywords: string[]): boolean {
@@ -567,6 +596,10 @@ function doesMatch(listing: ListingRow, alert: AlertWithDevice): boolean {
   }
 
   if (!regionMatches(listing, alert.regions)) {
+    return false;
+  }
+
+  if (!cityRadiusMatches(listing, alert.cities, alert.radiusKm)) {
     return false;
   }
 
@@ -667,6 +700,8 @@ export async function matchAndNotify(
       bodyTypes: true,
       motoTypes: true,
       regions: true,
+      cities: true,
+      radiusKm: true,
       ccmFrom: true,
       ccmTo: true,
       isActive: true,
@@ -740,7 +775,7 @@ export async function matchAndNotify(
         deviceId: alert.deviceId,
         expoPushToken: alert.device.expoPushToken,
         keywords: alert.keywords,
-        title: `[NOVO] ${listing.title}`,
+        title: listing.title,
         body: `${priceText}${listing.locationText ? ` | ${listing.locationText}` : ""}`,
         data: {
           listingId: listing.id,

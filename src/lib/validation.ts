@@ -125,6 +125,15 @@ export const createAlertSchema = z.object({
     .array(z.enum(["BEOGRAD", "VOJVODINA", "ZAPADNA", "ISTOCNA", "JUZNA", "KOSOVO"] as const))
     .max(6)
     .optional(),
+  // Lokacija "grad + precnik". Nazivi se ovde samo grubo proveravaju - controller
+  // ih uparuje sa spiskom poznatih gradova (features/notification/cities.ts).
+  cities: z.array(z.string().min(1).max(60)).max(20).optional(),
+  radiusKm: z
+    .number()
+    .int()
+    .min(0, 'Prečnik ne može biti negativan')
+    .max(300, 'Prečnik ne može biti veći od 300 km')
+    .nullish(),
   ccmFrom: z.number().int().positive('Kubikaža mora biti pozitivna').max(10000).nullish(),
   ccmTo: z.number().int().positive('Kubikaža mora biti pozitivna').max(10000).nullish(),
   isActive: z.boolean().default(true),

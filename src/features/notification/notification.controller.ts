@@ -6,6 +6,7 @@ import { backfillMatchForAlert } from "./matcher.js";
 import { FREE_BRONZE_CODE } from "../../lib/constants.js";
 import { sendVerificationEmail } from "../../lib/email.service.js";
 import { verifyGoogleIdToken } from "../../lib/googleAuth.js";
+import { CITY_CODES } from "./cities.js";
 import { REGION_CODES } from "./regions.js";
 
 type PlanTier = "FREE" | "BRONZE" | "SILVER" | "GOLD";
@@ -88,6 +89,11 @@ function getSingleString(value: unknown): string | null {
 
 const ALLOWED_FUEL_TYPES = new Set(["BENZIN", "DIZEL", "HIBRID", "ELEKTRO", "TNG", "CNG"]);
 const ALLOWED_REGIONS = new Set<string>(REGION_CODES);
+const ALLOWED_CITIES = new Set<string>(CITY_CODES);
+/** Najveci precnik koji klijent sme da posalje - sire od ovoga je cela Srbija. */
+const MAX_RADIUS_KM = 300;
+/** Koliko gradova sme da stoji na jednom signalu. */
+const MAX_CITIES_PER_ALERT = 20;
 const ALLOWED_MOTO_TYPES = new Set([
   "NAKED",
   "SPORT",
@@ -119,6 +125,27 @@ function getEnumList(value: unknown, allowed: Set<string>): string[] {
     .map((item) => item.trim().toUpperCase())
     .filter((item) => allowed.has(item));
   return Array.from(new Set(normalized));
+}
+
+/**
+ * Gradovi se salju kao normalizovani nazivi (mala slova, bez dijakritike) -
+ * isti kljucevi kao u cities.ts. Sve sto nije poznat grad se tiho odbacuje, isto
+ * kao kod ostalih enum lista.
+ */
+function getCityList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const normalized = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => ALLOWED_CITIES.has(item));
+  return Array.from(new Set(normalized)).slice(0, MAX_CITIES_PER_ALERT);
+}
+
+/** Precnik u km; van opsega 1..MAX_RADIUS_KM znaci "bez precnika" (samo grad). */
+function getRadiusKm(value: unknown): number | null {
+  const parsed = getOptionalInt(value);
+  if (parsed === null || parsed <= 0) return null;
+  return Math.min(parsed, MAX_RADIUS_KM);
 }
 
 function getOptionalInt(value: unknown): number | null {
@@ -591,6 +618,8 @@ export async function createAlert(req: Request, res: Response) {
   const ccmFrom = getOptionalInt(req.body?.ccmFrom);
   const ccmTo = getOptionalInt(req.body?.ccmTo);
   const regions = getEnumList(req.body?.regions, ALLOWED_REGIONS);
+  const cities = getCityList(req.body?.cities);
+  const radiusKm = cities.length > 0 ? getRadiusKm(req.body?.radiusKm) : null;
 
   const normalizedCategory = category?.toUpperCase() ?? null;
   const isAllCategory = normalizedCategory === "SVE";
@@ -704,6 +733,8 @@ export async function createAlert(req: Request, res: Response) {
       bodyTypes,
       motoTypes,
       regions,
+      cities,
+      radiusKm,
       ccmFrom,
       ccmTo,
       isActive: wantsActive,
@@ -847,6 +878,13 @@ export async function updateAlert(req: Request, res: Response) {
   const regions = hasField("regions")
     ? getEnumList(req.body?.regions, ALLOWED_REGIONS)
     : existing.regions;
+  const cities = hasField("cities") ? getCityList(req.body?.cities) : existing.cities;
+  const radiusKm =
+    cities.length === 0
+      ? null
+      : hasField("radiusKm")
+        ? getRadiusKm(req.body?.radiusKm)
+        : existing.radiusKm;
 
   // Ista pravila validacije kao kod kreiranja signala.
   if (!isAllCategory && (!priceMax || priceMax <= 0)) {
@@ -891,6 +929,8 @@ export async function updateAlert(req: Request, res: Response) {
       bodyTypes,
       motoTypes,
       regions,
+      cities,
+      radiusKm,
       ccmFrom,
       ccmTo,
     },

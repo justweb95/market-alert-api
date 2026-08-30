@@ -103,8 +103,14 @@ model Alert {
   // Moto filteri: motoTypes = NAKED, SPORT, CHOPPER, ENDURO, SKUTER, TURING, ATV, KLASIK
   motoTypes    String[]
   // Regioni Srbije (BEOGRAD, VOJVODINA, ZAPADNA, ISTOCNA, JUZNA, KOSOVO).
-  // Prazan niz = cela Srbija.
+  // Prazan niz = cela Srbija. Nasledjeno iz starijeg izbora preko mape -
+  // novi signali koriste cities + radiusKm.
   regions      String[]
+  // Izbor lokacije "grad + precnik": normalizovani nazivi gradova (isti
+  // kljucevi kao u features/notification/cities.ts) i precnik u kilometrima
+  // oko svakog od njih. Prazan niz = cela Srbija.
+  cities       String[]
+  radiusKm     Int?
   ccmFrom      Int?
   ccmTo        Int?
   isActive     Boolean  @default(true)

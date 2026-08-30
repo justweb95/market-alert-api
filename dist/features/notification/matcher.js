@@ -1,4 +1,5 @@
 import { prisma } from "../../db/prisma.js";
+import { distanceKm, getCityCoord } from "./cities.js";
 import { REGION_CITIES, REGION_CODES } from "./regions.js";
 import { loosenSearchText, normalizeSearchText } from "../../lib/text.js";
 import { sendExpoPushNotification } from "./expoPush.service.js";
@@ -86,10 +87,10 @@ async function sendAndPersistNotification(input) {
 }
 function buildBatchPushTitle(count) {
     if (count === 1)
-        return "[NOVO] 1 novi oglas";
+        return "1 novi oglas";
     if (count >= 2 && count <= 4)
-        return `[NOVO] ${count} nova oglasa`;
-    return `[NOVO] ${count} novih oglasa`;
+        return `${count} nova oglasa`;
+    return `${count} novih oglasa`;
 }
 function buildBatchPushBody(keywords, listings) {
     const keywordText = keywords.filter(Boolean).join(" ").trim();
@@ -362,7 +363,8 @@ function cityAppearsIn(city, haystack, words) {
         return words.has(city);
     return haystack.includes(city);
 }
-function getListingRegion(listing) {
+/** Grad iz oglasa (normalizovan naziv) + region kom pripada. */
+function getListingCity(listing) {
     const location = normalizeForMatch(listing.locationText ?? "");
     const haystack = location || buildListingText(listing);
     if (!haystack)
@@ -370,21 +372,46 @@ function getListingRegion(listing) {
     const words = new Set(haystack.split(/[^a-z0-9]+/).filter(Boolean));
     for (const entry of PRIORITY_CITIES) {
         if (cityAppearsIn(entry.city, haystack, words))
-            return entry.region;
+            return entry;
     }
     for (const entry of CITY_TO_REGION) {
         if (cityAppearsIn(entry.city, haystack, words))
-            return entry.region;
+            return entry;
     }
     return null;
 }
 function regionMatches(listing, regions) {
     if (regions.length === 0)
         return true; // cela Srbija
-    const region = getListingRegion(listing);
-    if (!region)
+    const match = getListingCity(listing);
+    if (!match)
         return false; // nepoznata lokacija - ne salji dok je filter ukljucen
-    return regions.includes(region);
+    return regions.includes(match.region);
+}
+/**
+ * Izbor lokacije "grad + precnik": oglas prolazi ako je njegov grad jedan od
+ * izabranih ili je unutar radiusKm od nekog izabranog grada. Prazan izbor =
+ * cela Srbija; nepoznata lokacija se ne salje dok je filter ukljucen (isto
+ * ponasanje kao kod regiona).
+ */
+function cityRadiusMatches(listing, cities, radiusKm) {
+    if (cities.length === 0)
+        return true;
+    const match = getListingCity(listing);
+    if (!match)
+        return false;
+    if (cities.includes(match.city))
+        return true;
+    const radius = radiusKm ?? 0;
+    if (radius <= 0)
+        return false;
+    const listingCoord = getCityCoord(match.city);
+    if (!listingCoord)
+        return false;
+    return cities.some((code) => {
+        const target = getCityCoord(code);
+        return target !== null && distanceKm(listingCoord, target) <= radius;
+    });
 }
 function keywordsMatchTitle(listing, keywords) {
     const { strict: strictTitle, loose: looseTitle } = getTitleForms(listing);
@@ -445,6 +472,9 @@ function doesMatch(listing, alert) {
         return false;
     }
     if (!regionMatches(listing, alert.regions)) {
+        return false;
+    }
+    if (!cityRadiusMatches(listing, alert.cities, alert.radiusKm)) {
         return false;
     }
     if (alert.yearFrom !== null || alert.yearTo !== null) {
@@ -544,6 +574,8 @@ export async function matchAndNotify(listings, options) {
             bodyTypes: true,
             motoTypes: true,
             regions: true,
+            cities: true,
+            radiusKm: true,
             ccmFrom: true,
             ccmTo: true,
             isActive: true,
@@ -594,7 +626,7 @@ export async function matchAndNotify(listings, options) {
                 deviceId: alert.deviceId,
                 expoPushToken: alert.device.expoPushToken,
                 keywords: alert.keywords,
-                title: `[NOVO] ${listing.title}`,
+                title: listing.title,
                 body: `${priceText}${listing.locationText ? ` | ${listing.locationText}` : ""}`,
                 data: {
                     listingId: listing.id,
